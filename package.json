@@ -1,7 +1,7 @@
 {
   "name": "astra-chat",
   "productName": "AstraChat",
-  "version": "0.1.0-alpha3",
+  "version": "0.1.0-alpha4",
   "description": "AstraChat —— 星辰跃动工作室出品的轻量级多模型 AI 聊天客户端",
   "author": "星辰跃动工作室 (XingChenYueDong Studio)",
   "license": "MIT",
