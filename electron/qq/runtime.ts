@@ -74,6 +74,13 @@ export interface QqRuntimePorts {
   createHttp?: (options: { appId: string; appSecret: string }) => QqRuntimeHttp;
   /** 注入网关工厂（测试用）。 */
   createGateway?: (deps: GatewayDeps) => QqGateway;
+  /**
+   * 群聊是否只在被 @ 时回应；缺省 `true`。
+   *
+   * 做成取值函数以便配置改动**立即生效**（不需要重连）。
+   * 开启「让模型自行决定是否回复」时必须返回 `false`，否则背景消息到不了模型。
+   */
+  requireAddressInGroup?: () => boolean;
 }
 
 /** 运行时句柄。 */
@@ -165,6 +172,9 @@ export function createQqRuntime(ports: QqRuntimePorts): QqRuntime {
         : http.sendPrivate(openId, message);
     },
     ...(ports.knownSecrets !== undefined ? { knownSecrets: ports.knownSecrets } : {}),
+    ...(ports.requireAddressInGroup !== undefined
+      ? { requireAddressInGroup: ports.requireAddressInGroup }
+      : {}),
     log,
   });
 

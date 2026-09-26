@@ -80,6 +80,16 @@ export interface QqServiceDeps {
   now?: () => number;
   /** 节流最长等待时间，缺省 {@link DEFAULT_MAX_WAIT_MS}。 */
   maxWaitMs?: number;
+  /**
+   * 群聊是否只在被 @ 时回应；缺省 `true`。
+   *
+   * 做成**取值函数**而不是布尔：用户可以随时在设置页切换模式，捕获一次的话
+   * 改完要重连才生效（而用户不会知道要重连）。
+   *
+   * 开启「让模型自行决定是否回复」时必须返回 `false` —— 否则背景消息在授权阶段就被
+   * 忽略，模型根本没机会看到它们，那个功能等于没开。
+   */
+  requireAddressInGroup?: () => boolean;
 }
 
 /** 编排层句柄。 */
@@ -280,6 +290,9 @@ export function createQqService(deps: QqServiceDeps): QqService {
         },
         contactPolicy: contact.policy,
         allowedCount: contact.allowedCount,
+        ...(deps.requireAddressInGroup !== undefined
+          ? { requireAddressInGroup: deps.requireAddressInGroup() }
+          : {}),
       });
 
       if (decision.action === 'ignore') {

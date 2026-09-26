@@ -78,6 +78,13 @@ export interface FakeQqServerOptions {
   /** 模型端点返回的正文；分两段流式吐出，用来验证增量累积。 */
   modelReply?: string;
   /**
+   * 逐次返回的模型回复队列（按调用顺序）。
+   *
+   * EXP 模式会**调用两次**（先判定、再生成），两次必须拿到不同内容，
+   * 所以需要按次给值。队列用完后一直返回最后一项。
+   */
+  modelReplies?: string[];
+  /**
    * 鉴权成功后**自动推一条事件**。
    *
    * 存在的理由：假服务端与冒烟检查跑在**不同进程**里（前者在 smoke.mjs，后者在
@@ -222,6 +229,7 @@ export async function startFakeQqServer(options: FakeQqServerOptions = {}): Prom
   const sendError = options.sendError ?? null;
   const rejectWithCode = options.rejectWithCode ?? null;
   const modelReply = options.modelReply ?? '模型回复';
+  const modelReplies = options.modelReplies ?? [];
   const autoEvent = options.autoEvent ?? null;
 
   const clients = new Set<Client>();
@@ -269,7 +277,11 @@ export async function startFakeQqServer(options: FakeQqServerOptions = {}): Prom
         res.setHeader('content-type', 'text/event-stream');
         res.setHeader('cache-control', 'no-cache');
 
-        const reply = modelReply;
+        // 按调用次序取回复；队列用完后一直返回最后一项
+        const reply =
+          modelReplies.length > 0
+            ? (modelReplies[Math.min(chatRequests.length - 1, modelReplies.length - 1)] ?? modelReply)
+            : modelReply;
         // 分两段，验证调用方把增量拼对了（而不是只取第一段）
         const half = Math.ceil(reply.length / 2);
         for (const piece of [reply.slice(0, half), reply.slice(half)]) {

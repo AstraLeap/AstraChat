@@ -414,3 +414,232 @@ describe('【核心】整条链路：真实 setup 栈 + 内存数据库 + 假模
     stack.stop();
   });
 });
+
+describe('让模型自行决定是否回复（标准 / EXP 两种模式）', () => {
+  /**
+   * 起一条真实装配栈。
+   *
+   * @param current 假服务端。
+   * @param socialMode 发言模式。
+   * @param extra 额外的配置覆盖。
+   * @returns 栈实例。
+   */
+  function startStack(
+    current: FakeQqServer,
+    socialMode: 'off' | 'standard' | 'exp',
+    extra: { socialCooldownMs?: number } = {},
+  ) {
+    const db = openDatabase(':memory:');
+    saveQqConfig(db, {
+      enabled: true,
+      appId: 'APP',
+      appSecret: 'SECRET',
+      intents: 1 << 25,
+      auditEnabled: true,
+      socialMode,
+      // 默认关掉冷却，让「由判定决定是否发言」这件事在测试里不被冷却干扰
+      socialCooldownMs: extra.socialCooldownMs ?? 0,
+    });
+    recordQqContactSeen(db, { openId: 'GROUP_OPENID', kind: 'group' });
+    setQqContactPolicy(db, 'GROUP_OPENID', 'allow');
+
+    return createQqStack({
+      db,
+      onStatus: () => undefined,
+      getSystemPrompt: () => '你是群友。',
+      getProvider: () => ({ baseUrl: current.baseUrl, apiKey: '', model: 'fake-model' }),
+      createHttp: (options) => createQqHttp({ ...options, baseUrl: current.baseUrl }),
+      log: () => undefined,
+    });
+  }
+
+  /**
+   * 取第 n 次模型调用发出的 messages。
+   *
+   * @param current 假服务端。
+   * @param index 调用序号。
+   * @returns 消息数组；没有则 `undefined`。
+   */
+  function requestMessages(
+    current: FakeQqServer,
+    index: number,
+  ): { role: string; content: string }[] | undefined {
+    return current.chatRequests[index]?.['messages'] as
+      | { role: string; content: string }[]
+      | undefined;
+  }
+
+  it('标准模式：模型判为沉默 → 一条都不发，但它确实看到了那条背景消息', async () => {
+    server = await startFakeQqServer({ modelReply: '[[SILENCE]]' });
+    const current = server;
+    const stack = startStack(current, 'standard');
+
+    await stack.start();
+    await waitFor(() => stack.getStatus().state === 'connected', '连接就绪');
+    current.pushEvent('GROUP_MESSAGE_CREATE', groupData({ content: '今天天气不错' }));
+
+    await waitFor(() => current.chatRequests.length > 0, '模型被调用');
+    // 等足够久，确认「如果会发就发了」
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    expect(current.sent).toHaveLength(0);
+    // 关键：背景消息**真的到达了模型**（说明 requireAddressInGroup 被放行）
+    const messages = requestMessages(current, 0);
+    expect(messages?.[messages.length - 1]?.content).toContain('今天天气不错');
+    // 发言说明在系统提示词里
+    expect(messages?.[0]?.content).toContain('[[SILENCE]]');
+
+    stack.stop();
+  });
+
+  it('标准模式：模型正常回复 → 照常发出去（哨兵不误伤真实内容）', async () => {
+    server = await startFakeQqServer({ modelReply: '这波稳了' });
+    const current = server;
+    const stack = startStack(current, 'standard');
+
+    await stack.start();
+    await waitFor(() => stack.getStatus().state === 'connected', '连接就绪');
+    current.pushEvent('GROUP_MESSAGE_CREATE', groupData());
+
+    await waitFor(() => current.sent.length > 0, '收到回复');
+    expect(current.sent[0]?.body?.['content']).toBe('这波稳了');
+
+    stack.stop();
+  });
+
+  it('标准模式：被 @ 时必定回复，且系统提示词不带发言说明', async () => {
+    server = await startFakeQqServer({ modelReply: '在的' });
+    const current = server;
+    const stack = startStack(current, 'standard');
+
+    await stack.start();
+    await waitFor(() => stack.getStatus().state === 'connected', '连接就绪');
+    current.pushEvent('GROUP_AT_MESSAGE_CREATE', groupData());
+
+    await waitFor(() => current.sent.length > 0, '收到回复');
+    expect(current.sent[0]?.body?.['content']).toBe('在的');
+    // 被叫到不需要那段说明；带上反而浪费 token 且可能让模型对 @ 也沉默
+    expect(requestMessages(current, 0)?.[0]?.content).not.toContain('[[SILENCE]]');
+
+    stack.stop();
+  });
+
+  it('EXP 模式：判定为 SILENCE → 只调用一次模型，什么都不发', async () => {
+    server = await startFakeQqServer({ modelReplies: ['SILENCE', '不该出现'] });
+    const current = server;
+    const stack = startStack(current, 'exp');
+
+    await stack.start();
+    await waitFor(() => stack.getStatus().state === 'connected', '连接就绪');
+    current.pushEvent('GROUP_MESSAGE_CREATE', groupData());
+
+    await waitFor(() => current.chatRequests.length > 0, '判定调用发生');
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    // 判定后就不再生成第二次 —— 这正是 EXP「省下生成」的地方
+    expect(current.chatRequests).toHaveLength(1);
+    expect(current.sent).toHaveLength(0);
+    // 第一次调用的系统提示词是判定用的
+    expect(requestMessages(current, 0)?.[0]?.content).toContain('SPEAK');
+
+    stack.stop();
+  });
+
+  it('EXP 模式：判定为 SPEAK → 第二次调用生成并真的发出去', async () => {
+    server = await startFakeQqServer({ modelReplies: ['SPEAK', '好啊'] });
+    const current = server;
+    const stack = startStack(current, 'exp');
+
+    await stack.start();
+    await waitFor(() => stack.getStatus().state === 'connected', '连接就绪');
+    current.pushEvent('GROUP_MESSAGE_CREATE', groupData());
+
+    await waitFor(() => current.sent.length > 0, '收到回复');
+    expect(current.chatRequests).toHaveLength(2);
+    expect(current.sent[0]?.body?.['content']).toBe('好啊');
+    // 生成那次不该带判定提示词
+    expect(requestMessages(current, 1)?.[0]?.content).not.toContain('只有确实需要你回应时才 SPEAK');
+
+    stack.stop();
+  });
+
+  it('EXP 模式：判定无法解析 → 按沉默处理（fail-closed）', async () => {
+    server = await startFakeQqServer({ modelReplies: ['我不确定', '不该出现'] });
+    const current = server;
+    const stack = startStack(current, 'exp');
+
+    await stack.start();
+    await waitFor(() => stack.getStatus().state === 'connected', '连接就绪');
+    current.pushEvent('GROUP_MESSAGE_CREATE', groupData());
+
+    await waitFor(() => current.chatRequests.length > 0, '判定调用发生');
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    expect(current.chatRequests).toHaveLength(1);
+    expect(current.sent).toHaveLength(0);
+
+    stack.stop();
+  });
+
+  it('冷却：第一条发出后，冷却期内的第二条背景消息连模型都不调用', async () => {
+    server = await startFakeQqServer({ modelReply: '第一条' });
+    const current = server;
+    const stack = startStack(current, 'standard', { socialCooldownMs: 60_000 });
+
+    await stack.start();
+    await waitFor(() => stack.getStatus().state === 'connected', '连接就绪');
+
+    current.pushEvent('GROUP_MESSAGE_CREATE', groupData({ id: 'MSG_1' }));
+    await waitFor(() => current.sent.length > 0, '第一条发出');
+    const callsAfterFirst = current.chatRequests.length;
+
+    current.pushEvent('GROUP_MESSAGE_CREATE', groupData({ id: 'MSG_2' }));
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    // 冷却期内不主动发言 —— 而且是在**调用模型之前**就挡住了（省成本）
+    expect(current.chatRequests).toHaveLength(callsAfterFirst);
+    expect(current.sent).toHaveLength(1);
+
+    stack.stop();
+  });
+
+  it('冷却不拦被 @ 的消息', async () => {
+    server = await startFakeQqServer({ modelReply: '在的' });
+    const current = server;
+    const stack = startStack(current, 'standard', { socialCooldownMs: 60_000 });
+
+    await stack.start();
+    await waitFor(() => stack.getStatus().state === 'connected', '连接就绪');
+
+    // 先让机器人主动说一句，进入冷却
+    current.pushEvent('GROUP_MESSAGE_CREATE', groupData({ id: 'MSG_1' }));
+    await waitFor(() => current.sent.length > 0, '第一条发出');
+
+    // 然后 @ 它 —— 冷却不该挡住被叫到的情况
+    current.pushEvent('GROUP_AT_MESSAGE_CREATE', groupData({ id: 'MSG_2' }));
+    await waitFor(() => current.sent.length > 1, '被 @ 后回复');
+
+    expect(current.sent).toHaveLength(2);
+
+    stack.stop();
+  });
+
+  it('【回归】社交模式关闭时，背景消息在授权阶段就被忽略（不产生模型调用）', async () => {
+    server = await startFakeQqServer({ modelReply: '不该出现' });
+    const current = server;
+    const stack = startStack(current, 'off');
+
+    await stack.start();
+    await waitFor(() => stack.getStatus().state === 'connected', '连接就绪');
+    current.pushEvent('GROUP_MESSAGE_CREATE', groupData());
+
+    // 给它足够时间「如果会调就调了」
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    // 这条锁定「off 与实现本功能之前的行为完全一致」
+    expect(current.chatRequests).toHaveLength(0);
+    expect(current.sent).toHaveLength(0);
+
+    stack.stop();
+  });
+});

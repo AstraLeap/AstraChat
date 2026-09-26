@@ -1,5 +1,14 @@
 import * as repo from '../../src/db/index';
 import { createQqConversation, promptKeyOf } from '../../src/services/qq/conversation';
+import {
+  SILENCE_INSTRUCTION,
+  VERDICT_SYSTEM_PROMPT,
+  createParticipationBudget,
+  parseVerdict,
+  readSentinelVerdict,
+  stripSentinel,
+  type ParticipationBudget,
+} from '../../src/services/qq/participation';
 import { createQqHistory } from '../../src/services/qq/history';
 import { isRoleClearRequest, type QqCommand } from '../../src/services/qq/commands';
 import { createQqDbPorts } from './adapters';
@@ -9,7 +18,7 @@ import { createQqRuntime, type QqRuntime, type QqRuntimeHttp } from './runtime';
 export type { QqRuntime };
 import type { Db } from '../../src/db/index';
 import type { QqInbound } from '../../src/services/qq/events';
-import type { QqConnectionSnapshot } from '../../src/types/index';
+import type { QqConfig, QqConnectionSnapshot } from '../../src/types/index';
 
 /**
  * 把 QQ 的全部零件装配成可直接使用的运行时。
@@ -117,27 +126,122 @@ export function createQqStack(deps: QqStackDeps): QqRuntime {
   const history = createQqHistory();
   const conversation = createQqConversation({
     history,
-    getSystemPrompt: (message) => deps.getSystemPrompt(message),
+    getSystemPrompt: (message) => {
+      const base = deps.getSystemPrompt(message);
+      const config = ports.loadConfig();
+      // 只有「标准模式的**背景**消息」才需要那段发言说明：
+      // 被指向的消息必定回复（说明是多余的），EXP 模式由独立的判定调用负责。
+      const needsInstruction = config.socialMode === 'standard' && !message.addressedToBot;
+      return needsInstruction ? `${base}\n\n${SILENCE_INSTRUCTION}` : base;
+    },
   });
   const completer = createQqCompleter({
     getProvider: deps.getProvider ?? (() => pickProvider(deps.db)),
     log,
   });
 
+  /** 主动发言的冷却与预算；上限配置变了就重建。 */
+  let budget: ParticipationBudget | null = null;
+  let budgetKey = '';
+
+  /**
+   * 取发言预算，必要时按当前配置重建。
+   *
+   * 必须**在 setup 层持有**而不是每次调用新建 —— 后者每次都是全新状态，
+   * 冷却与每小时上限会完全失效（而且测试很难发现，因为行为看起来「正常」）。
+   *
+   * @param config 当前配置。
+   * @returns 预算实例。
+   */
+  function getBudget(config: QqConfig): ParticipationBudget {
+    const key = `${config.socialCooldownMs}|${config.socialMaxPerHour}`;
+    if (budget === null || budgetKey !== key) {
+      budget = createParticipationBudget({
+        cooldownMs: config.socialCooldownMs,
+        maxPerHour: config.socialMaxPerHour,
+      });
+      budgetKey = key;
+    }
+    return budget;
+  }
+
+  /**
+   * 正常生成一条回复并记进历史。
+   *
+   * @param key 来源键。
+   * @param message 入站消息。
+   * @returns 回复文本。
+   */
+  async function speak(key: string, message: QqInbound): Promise<string> {
+    const messages = conversation.buildPrompt(message);
+    const reply = await completer.complete(messages);
+    conversation.rememberReply(key, reply);
+    return reply;
+  }
+
   /** 运行中的实例引用，供 `/status` 这类命令读取。 */
   let current: QqRuntime | null = null;
 
   const runtime = createQqRuntime({
     loadConfig: () => ports.loadConfig(),
+    // 开启「让模型自行决定是否回复」时放行背景消息。
+    // 用取值函数而不是固定值：用户在设置页切换模式后立即生效，不必重连。
+    requireAddressInGroup: () => ports.loadConfig().socialMode === 'off',
     ...(deps.createHttp !== undefined ? { createHttp: deps.createHttp } : {}),
     lookupContact: (openId) => ports.lookupContact(openId),
     recordContactSeen: (input) => ports.recordContactSeen(input),
 
     generateReply: async (key, message) => {
-      // 会话装配：先把这条记进历史，再连同历史一起拼成 prompt
+      const config = ports.loadConfig();
+      const mode = config.socialMode;
+
+      // 被 @ 或私聊 → **必定回复**：不做判定、也不占主动发言额度。
+      // 被叫到不回是社交事故；而且这样只有背景消息才付判定成本。
+      if (mode === 'off' || message.addressedToBot) {
+        return await speak(key, message);
+      }
+
+      const judge = getBudget(config);
+      const now = Date.now();
+      const allowed = judge.check(key, now);
+      if (!allowed.allowed) {
+        log(`不主动发言：${allowed.reason}`);
+        return '';
+      }
+
+      if (mode === 'standard') {
+        // 标准模式：单次调用 + 哨兵。发言说明已由 conversation 拼进系统提示词。
+        const messages = conversation.buildPrompt(message);
+        const raw = await completer.complete(messages);
+        const verdict = readSentinelVerdict(raw);
+        if (!verdict.speak) {
+          log(`不主动发言：${verdict.reason}`);
+          return '';
+        }
+        judge.record(key, now);
+        // 清掉正文里偶现的哨兵字样，避免它跟着回复被发到群里
+        const text = stripSentinel(raw);
+        conversation.rememberReply(key, text);
+        return text;
+      }
+
+      // EXP 实验性模式：先判定、再生成。
+      // **同一个 messages 用于两次调用**，避免把当前消息记两遍
+      // （`buildPrompt` 已经把它写进历史了）。
       const messages = conversation.buildPrompt(message);
+      const verdictRaw = await completer.complete([
+        { role: 'system', content: VERDICT_SYSTEM_PROMPT },
+        // 判定不需要人格设定，去掉原来的 system，只留对话与当前这条
+        ...messages.filter((item) => item.role !== 'system'),
+      ]);
+      const verdict = parseVerdict(verdictRaw);
+      if (!verdict.speak) {
+        log(`不主动发言：${verdict.reason}`);
+        return '';
+      }
+
+      judge.record(key, now);
       const reply = await completer.complete(messages);
-      // 只记非空回复，避免把「什么都没说」写进上下文
       conversation.rememberReply(key, reply);
       return reply;
     },

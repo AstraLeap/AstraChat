@@ -1,23 +1,24 @@
 import { useEffect, useState } from 'react';
 import { useQqStore } from '../../stores/useQqStore';
 import { useQqConnection } from './useQqConnection';
-import type { QqConfig, QqConnectionState } from '../../types/index';
-import { Badge, Button, Field, IconWarning, Input, type BadgeTone } from '../ui';
+import type { QqConfig, QqConnectionState, QqSocialMode } from '../../types/index';
+import { Badge, Button, Field, IconWarning, Input, Select, type BadgeTone } from '../ui';
 import { hasSecret, maskSecret } from './mask';
 import QqContactList from './QqContactList';
 
 /**
  * QQ bot 配置表单。
  *
- * **版本边界（必须常驻可见）**：当前版本只把配置落库并呈现由用户操作驱动的连接状态；
- * 「连接 / 断开」**不会**建立任何真实连接，也不会与 QQ 服务器发生任何交互。
- * 真实连接（官方 QQ 开放平台 Bot API）属于后续阶段。
+ * ## 版本边界
+ *
+ * 「连接 / 断开」是**真实连接**：走官方 QQ 开放平台 Bot API，由主进程建立
+ * WebSocket 网关。连接状态取自运行期快照（{@link useQqConnection}），不是落库的旧状态。
  *
  * ## 与 v0.1.0 的实质差别
  *
  * v0.1.0 让用户手填「群号」白名单。但官方 API 只给 `openid`、不给群号，用户无从手填，
  * 因此改成「**已发现的来源**」列表（{@link QqContactList}）：机器人先把来源记下来，
- * 用户再逐条授权。本表单因此只剩凭据、连接行为与发送节流。
+ * 用户再逐条授权。本表单因此只剩凭据、连接行为、发言模式与发送节流。
  */
 
 /** 表单草稿。数字字段用字符串保存，便于处理「清空输入框」这种中间态。 */
@@ -33,7 +34,17 @@ interface QqDraft {
   maxSendPerMinute: string;
   maxSendPerHour: string;
   maxReplyChars: string;
+  socialMode: QqSocialMode;
+  socialCooldownMs: string;
+  socialMaxPerHour: string;
 }
+
+/** 发言模式的说明文案（选哪个直接决定成本）。 */
+const SOCIAL_MODE_HINT: Record<QqSocialMode, string> = {
+  off: '只回应被 @ 或私聊的消息。群里其它消息连模型都不会调用。',
+  standard: '单次调用：模型不想接话时只输出 [[SILENCE]]。省 token，判定略粗。',
+  exp: '两次调用：先单独判断要不要接话，再生成。更准（生成中的模型有「把话说下去」的惯性），但消耗约翻倍。',
+};
 
 /**
  * **实时**连接状态 → 徽章文案与语义色。
@@ -54,6 +65,8 @@ const NUMERIC_FIELDS = {
   maxSendPerMinute: { label: '每分钟上限', min: 1, max: 600, unit: '条' },
   maxSendPerHour: { label: '每小时上限', min: 1, max: 36_000, unit: '条' },
   maxReplyChars: { label: '单条字符上限', min: 1, max: 4500, unit: '字符' },
+  socialCooldownMs: { label: '主动发言冷却', min: 0, max: 3_600_000, unit: '毫秒' },
+  socialMaxPerHour: { label: '每小时主动发言上限', min: 1, max: 600, unit: '条' },
 } as const;
 
 /** 需要校验的字段集合。 */
@@ -80,6 +93,9 @@ function toDraft(config: QqConfig): QqDraft {
     maxSendPerMinute: String(config.maxSendPerMinute),
     maxSendPerHour: String(config.maxSendPerHour),
     maxReplyChars: String(config.maxReplyChars),
+    socialMode: config.socialMode,
+    socialCooldownMs: String(config.socialCooldownMs),
+    socialMaxPerHour: String(config.socialMaxPerHour),
   };
 }
 
@@ -207,6 +223,9 @@ export default function QqConfigForm() {
       maxSendPerMinute: Number(draft.maxSendPerMinute),
       maxSendPerHour: Number(draft.maxSendPerHour),
       maxReplyChars: Number(draft.maxReplyChars),
+      socialMode: draft.socialMode,
+      socialCooldownMs: Number(draft.socialCooldownMs),
+      socialMaxPerHour: Number(draft.socialMaxPerHour),
     });
     setDirty(!ok);
     setSavedHint(ok);
@@ -442,6 +461,29 @@ export default function QqConfigForm() {
             </span>
           </p>
         ) : null}
+      </fieldset>
+
+      {/* ---------------------------------------------------- 发言模式 */}
+      <fieldset className="flex flex-col gap-3 rounded-md border border-[var(--astra-border)] px-3 py-3">
+        <legend className="px-1 text-[11px] font-semibold text-[var(--astra-text)]">
+          让模型自行决定是否回复
+        </legend>
+        <p className="-mt-1 text-[11px] text-[var(--astra-muted)]">
+          关闭时只回应被 @ 或私聊的消息。开启后，群里**未被指向**的消息也会交给模型判断要不要接话；
+          被 @ 与私聊**始终必定回复**，不经过判断。冷却与每小时上限在下方「发送节流」里设置。
+        </p>
+
+        <Field label="发言模式" htmlFor="qq-socialMode" hint={SOCIAL_MODE_HINT[draft.socialMode]}>
+          <Select
+            id="qq-socialMode"
+            value={draft.socialMode}
+            onChange={(event) => setField('socialMode', event.target.value as QqSocialMode)}
+          >
+            <option value="off">关闭 —— 只回应被 @ 的消息（默认）</option>
+            <option value="standard">标准 —— 单次调用，模型用哨兵表态（省 token）</option>
+            <option value="exp">EXP 实验性 —— 两次调用，判定更准但消耗约翻倍</option>
+          </Select>
+        </Field>
       </fieldset>
 
       {/* ------------------------------------------------------ 发送节流 */}
