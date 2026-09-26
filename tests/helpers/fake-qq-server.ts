@@ -77,6 +77,14 @@ export interface FakeQqServerOptions {
   sendError?: { code: number; message: string } | null;
   /** 模型端点返回的正文；分两段流式吐出，用来验证增量累积。 */
   modelReply?: string;
+  /**
+   * 鉴权成功后**自动推一条事件**。
+   *
+   * 存在的理由：假服务端与冒烟检查跑在**不同进程**里（前者在 smoke.mjs，后者在
+   * Electron 主进程），跨进程没法直接调 `pushEvent`。所以让服务端在收到 Identify 后
+   * 自己推一条，调用方只要连上并等结果即可。
+   */
+  autoEvent?: { t: string; d: unknown } | null;
   /** 是否在下发 Hello 后立刻用关闭码踢掉连接（测 intents 无权限）。 */
   rejectWithCode?: number | null;
 }
@@ -214,6 +222,7 @@ export async function startFakeQqServer(options: FakeQqServerOptions = {}): Prom
   const sendError = options.sendError ?? null;
   const rejectWithCode = options.rejectWithCode ?? null;
   const modelReply = options.modelReply ?? '模型回复';
+  const autoEvent = options.autoEvent ?? null;
 
   const clients = new Set<Client>();
   const sent: { path: string; body: Record<string, unknown> }[] = [];
@@ -268,6 +277,12 @@ export async function startFakeQqServer(options: FakeQqServerOptions = {}): Prom
         }
         res.write('data: [DONE]\n\n');
         res.end();
+        return;
+      }
+
+      // 测试端点：跨进程的调用方（如 Electron 冒烟）用它查「有没有消息发过来」
+      if (url === '/__test/sent') {
+        res.end(JSON.stringify({ sent }));
         return;
       }
 
@@ -410,6 +425,14 @@ export async function startFakeQqServer(options: FakeQqServerOptions = {}): Prom
               },
             }),
           );
+
+          // 鉴权成功后自动推一条事件：跨进程的调用方靠这个触发，而不是调 pushEvent
+          if (autoEvent !== null) {
+            seq += 1;
+            client.send(
+              JSON.stringify({ op: 0, s: seq, t: autoEvent.t, d: autoEvent.d }),
+            );
+          }
           continue;
         }
         if (op === 6) {
