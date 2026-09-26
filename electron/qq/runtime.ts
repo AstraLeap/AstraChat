@@ -1,4 +1,4 @@
-import { createQqConnection, type QqConnection, type QqConnectionHttp, type QqConnectionStatus } from './connection';
+import { createQqConnection, type QqConnection, type QqConnectionHttp, type QqConnectionSnapshot } from './connection';
 import { createQqHttp } from './http';
 import { createQqService, type QqService } from './service';
 import type { QqCommand } from '../../src/services/qq/commands';
@@ -67,7 +67,7 @@ export interface QqRuntimePorts {
   /** 已知的敏感值，传给审计。 */
   knownSecrets?: () => readonly string[];
   /** 状态变化：落库 + 推给界面。 */
-  onStatus: (status: QqConnectionStatus) => void;
+  onStatus: (status: QqConnectionSnapshot) => void;
   /** 日志出口。 */
   log?: (message: string) => void;
   /** 注入 HTTP 工厂（测试用）。 */
@@ -85,7 +85,7 @@ export interface QqRuntime {
   /** 重新读配置并重连（用户改了设置）。 */
   restart(): Promise<void>;
   /** 当前状态。 */
-  getStatus(): QqConnectionStatus;
+  getStatus(): QqConnectionSnapshot;
 }
 
 /**
@@ -137,7 +137,7 @@ export function createQqRuntime(ports: QqRuntimePorts): QqRuntime {
    *
    * @param status 状态快照。
    */
-  function publishStatus(status: QqConnectionStatus): void {
+  function publishStatus(status: QqConnectionSnapshot): void {
     const key = `${status.state}|${status.message}|${status.botId ?? ''}`;
     if (key === lastStatusKey) {
       return;
@@ -211,7 +211,7 @@ export function createQqRuntime(ports: QqRuntimePorts): QqRuntime {
       publishStatus(connection.getState());
     },
 
-    getStatus(): QqConnectionStatus {
+    getStatus(): QqConnectionSnapshot {
       return connection.getState();
     },
   };

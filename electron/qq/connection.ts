@@ -4,6 +4,9 @@ import {
   type QqGateway,
 } from '../../src/services/qq/gateway';
 import type { GatewayInfo, GatewayPayload } from '../../src/services/qq/protocol';
+import type { QqConnectionSnapshot, QqConnectionState } from '../../src/types/index';
+
+export type { QqConnectionSnapshot, QqConnectionState };
 
 /**
  * QQ 连接管理器。
@@ -25,26 +28,6 @@ import type { GatewayInfo, GatewayPayload } from '../../src/services/qq/protocol
  * 与其带着坏配置去撞服务端、让用户看到一句「连接失败」，不如**在本地就明确说清楚**
  * 缺什么 —— 这类问题用户自己能立刻修好。
  */
-
-/** 连接对外状态。 */
-export type QqConnectionState =
-  /** 未连接（初始状态，或用户主动停止）。 */
-  | 'stopped'
-  /** 正在建立连接或重连中。 */
-  | 'connecting'
-  /** 已就绪（收到过 READY）。 */
-  | 'connected'
-  /** 遇到不可恢复的错误，已停止。 */
-  | 'error';
-
-/** 对外状态快照。 */
-export interface QqConnectionStatus {
-  state: QqConnectionState;
-  /** 补充说明：错误原因、进度提示等；可直接展示给用户。 */
-  message: string;
-  /** 机器人自己的 id；收到 READY 之前为 `null`。 */
-  botId: string | null;
-}
 
 /** 连接管理器只需要的 HTTP 能力（真实 `QqHttpClient` 结构上满足它）。 */
 export interface QqConnectionHttp {
@@ -87,7 +70,7 @@ export interface QqConnection {
   /** 重新读配置并重连（用户改了设置 / 手动重连）。 */
   restart(): Promise<void>;
   /** 当前状态快照。 */
-  getState(): QqConnectionStatus;
+  getState(): QqConnectionSnapshot;
 }
 
 /**
@@ -219,7 +202,7 @@ export function createQqConnection(deps: QqConnectionDeps): QqConnection {
       await start();
     },
 
-    getState(): QqConnectionStatus {
+    getState(): QqConnectionSnapshot {
       return { state, message, botId };
     },
   };

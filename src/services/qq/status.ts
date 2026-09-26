@@ -1,4 +1,6 @@
-import type { QqConnectionStatus } from '../../types/index';
+import type { QqConnectionSnapshot, QqConnectionState, QqConnectionStatus } from '../../types/index';
+
+export type { QqConnectionSnapshot, QqConnectionState };
 
 /**
  * 连接状态：**运行期快照** → **落库形态**。
@@ -20,26 +22,6 @@ import type { QqConnectionStatus } from '../../types/index';
  * 所以**不能直接赋值**，必须显式映射。本模块就是那个映射，并且把
  * 「运行期快照」定义为这里的规范类型（它不属于 I/O，属于领域概念）。
  */
-
-/** 运行期连接状态。 */
-export type QqConnectionState =
-  /** 未连接（初始状态，或用户主动停止）。 */
-  | 'stopped'
-  /** 正在建立连接或重连中。 */
-  | 'connecting'
-  /** 已就绪（收到过 READY）。 */
-  | 'connected'
-  /** 遇到不可恢复的错误，已停止。 */
-  | 'error';
-
-/** 运行期状态快照。 */
-export interface QqConnectionSnapshot {
-  state: QqConnectionState;
-  /** 补充说明：错误原因、进度提示等；可直接展示给用户。 */
-  message: string;
-  /** 机器人自己的 id；收到 READY 之前为 `null`。 */
-  botId: string | null;
-}
 
 /** 落库结果。 */
 export interface PersistedStatus {

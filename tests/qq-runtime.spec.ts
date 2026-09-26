@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { conversationKeyOf, createQqRuntime, type QqRuntimeHttp } from '../electron/qq/runtime';
-import type { QqConnectionStatus } from '../electron/qq/connection';
+import type { QqConnectionSnapshot } from '../electron/qq/connection';
 import type { GatewayDeps, GatewayState, QqGateway } from '../src/services/qq/gateway';
 import type { QqInbound } from '../src/services/qq/events';
 import type { OutboundMessage } from '../src/services/qq/send';
@@ -108,7 +108,7 @@ function fakeHttp(sends: SendRecord[]) {
 /** 搭一套被测环境。 */
 function setup(configOverrides: Partial<QqConfig> = {}) {
   const gateway = makeFakeGateway();
-  const statuses: QqConnectionStatus[] = [];
+  const statuses: QqConnectionSnapshot[] = [];
   const replies: { key: string; text: string; role: string }[] = [];
   const logs: string[] = [];
   const seen: { openId: string; kind: string }[] = [];

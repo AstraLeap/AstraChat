@@ -285,13 +285,40 @@ GROUP_AND_C2C_EVENT (1 << 25)
 > 开启全量后只能看载荷里的 `mentions` 是否含机器人 id
 > （实现见 `src/services/qq/events.ts` 的 `addressedToBot`）。
 >
-> ⚠️ **但仍有一个未验证的高风险假设**：上面这个实验只打出了事件名，
-> 没有打印载荷，所以**「@ 消息的 `GROUP_MESSAGE_CREATE` 一定带 `mentions`」尚未验证**。
-> 若官方不填这个字段，`mentions` 判定会全面失效 —— 机器人要么对每条群消息都插嘴、
-> 要么永远沉默，**两种情况都不会报错**（最危险的一类 bug：行为不对但无错误信号）。
+> ✅ **2026-09-26 二次实测（`--listen 60 --dump`，带原始载荷）：`mentions` 确实存在，
+> 但判定必须用 `is_you`，不能比对 id。**
 >
-> 验证方法：`node scripts/qq-probe.mjs --listen 60 --dump`，
-> 看 `本项目解析：… 指向机器人=是 ✅` 是否对 @ 消息成立。
+> 实测到的 @ 消息载荷关键字段：
+>
+> ```json
+> "content": "<@112B3DDE009A9992D13BF0AF7BE443A3> 111",
+> "mentions": [{
+>   "bot": true, "id": "112B3DDE009A9992D13BF0AF7BE443A3",
+>   "is_you": true, "member_openid": "112B3DDE009A9992D13BF0AF7BE443A3",
+>   "member_role": "member", "scope": "single", "username": "笙澜"
+> }]
+> ```
+>
+> ### ⚠️ 两个必须记住的坑
+>
+> **坑 1：`mentions[].id` 与 READY 的 `d.user.id` 不是同一套 id 空间。**
+>
+> | 来源 | 实测值 | 形态 |
+> |---|---|---|
+> | READY 的 `d.user.id` | `1227781930829794431` | 数字 id |
+> | `mentions[].id` | `112B3DDE009A9992D13BF0AF7BE443A3` | **openid（32 位十六进制）** |
+>
+> 拿它们比较**永远不相等**，会让「有没有 @ 我」恒判为否 —— 表现为机器人对任何 @ 都不回应，
+> 且**不产生任何错误信号**。**正确判据是 `is_you === true`**（与 id 空间无关）。
+>
+> 另外**不能把 `bot: true` 当成「@ 了我」**：群里可能同时有别的机器人，
+> 那个字段只说明被提及的是个机器人，不说明是自己。
+>
+> **坑 2：全量模式下官方不剥离正文里的 @ 占位符。**
+>
+> 正文是 `<@112B3DDE…> 111` 而不是 `111`。若直接投给模型，模型看到的是一串 openid。
+> 实现里由 `stripMentionPlaceholders` 剥掉（只删占位符与紧跟的一个空白，
+> **不做全局空白折叠**，否则会压平用户正文里的换行）。
 
 原始文档记载（保留备查，注意与实测冲突）：
 
@@ -448,10 +475,9 @@ GROUP_AND_C2C_EVENT (1 << 25)
 
 ## 9. 不确定与坑（**必须真实账号验证，不要当成事实**）
 
-1. **`GROUP_MESSAGE_CREATE` 是否带 `mentions`** —— 全量模式下判定「有没有 @ 机器人」
-   的唯一依据（见 §5.1）。**这是目前最高风险的一项**：假设不成立会让机器人
-   对每条群消息都插嘴或永远沉默，且**不产生任何错误信号**。
-   用 `node scripts/qq-probe.mjs --listen 60 --dump` 验证：@ 消息应显示「指向机器人=是 ✅」。
+1. ~~**`GROUP_MESSAGE_CREATE` 是否带 `mentions`**~~ —— ✅ **已实测：带**，但
+   **必须用 `is_you` 判断，`mentions[].id` 与 READY 的 `user.id` 不同 id 空间**；
+   且正文会残留 `<@openid>` 占位符。详见 §5.1 的两个坑。
 2. ~~**全量群消息的事件类型是哪个**~~ —— ✅ 已实测：全量开启后 @ 消息也走
    `GROUP_MESSAGE_CREATE`，`GROUP_AT_MESSAGE_CREATE` 只在全量关闭时出现（§5.1）。
 3. ~~**`GROUP_AND_C2C_EVENT (1<<25)` 是否需要申请**~~ —— ✅ 实测**不需要**，已解。

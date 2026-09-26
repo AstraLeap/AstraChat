@@ -192,6 +192,32 @@ export type UpdatePersonaInput = Partial<Omit<Persona, 'id' | 'createdAt' | 'upd
 export type QqConnectionStatus = 'disconnected' | 'connected' | 'error';
 
 /**
+ * **运行期**连接状态。
+ *
+ * 与 {@link QqConnectionStatus} 是**两个不同概念**，别混：
+ *
+ * | 类型 | 取值 | 用途 |
+ * |---|---|---|
+ * | `QqConnectionStatus` | `disconnected` / `connected` / `error` | **落库**（`QqConfig.status`） |
+ * | `QqConnectionState` | `stopped` / `connecting` / `connected` / `error` | **运行期快照** |
+ *
+ * 运行期多一个 `connecting`（瞬时态，不该落库），且「用户主动停止」在运行期是
+ * `stopped`、落库是 `disconnected`。两者的映射见
+ * `src/services/qq/status.ts` 的 `toPersistedStatus`。
+ */
+export type QqConnectionState = 'stopped' | 'connecting' | 'connected' | 'error';
+
+/** 运行期连接状态快照（设置页显示的就是它）。 */
+export interface QqConnectionSnapshot {
+  /** 运行期状态。 */
+  state: QqConnectionState;
+  /** 补充说明：错误原因、进度提示等；可直接展示给用户。 */
+  message: string;
+  /** 机器人自己的 id；收到 READY 之前为 `null`。 */
+  botId: string | null;
+}
+
+/**
  * QQ bot 配置。
  *
  * v0.1.0 **只做配置存储与界面呈现**：「连接 / 断开」按钮只切换本地状态，不建立任何网络连接。
