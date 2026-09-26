@@ -8,14 +8,29 @@
  * ## 用法
  *
  * ```sh
- * node scripts/bump-version.mjs                  # 同阶段序号 +1（日常的功能 / 修复）
- * node scripts/bump-version.mjs --promote        # 推进到下一阶段，序号归零
- * node scripts/bump-version.mjs --stage beta     # 指定阶段（往上走归零；同阶段即 +1）
- * node scripts/bump-version.mjs --numeric minor  # 大规模更新：数字版本 +1，阶段回 alpha0
+ * node scripts/bump-version.mjs                  # 同一阶段序号 +1（日常的功能 / 修复）
+ * node scripts/bump-version.mjs --promote        # 推进到下一阶段；从 rc 推进 → 稳定版
+ * node scripts/bump-version.mjs --stage rc       # 指定阶段（往上走归零；同阶段即 +1）
+ * node scripts/bump-version.mjs --stage stable   # 直接成为稳定版（去掉后缀）
+ * node scripts/bump-version.mjs --numeric minor  # 大规模更新 / 稳定版之后：数字 +1，阶段回 alpha0
  * node scripts/bump-version.mjs --set 0.1.0-rc0  # 显式指定（仍会校验格式）
  * node scripts/bump-version.mjs --dry-run        # 只预览，不写文件
- * node scripts/bump-version.mjs --tag            # 写完后打 git tag v<版本>
+ * node scripts/bump-version.mjs --tag            # 【只打 tag】给 package.json 当前版本打 tag
  * ```
+ *
+ * ## 为什么 `--tag` 不跟改版本号一起做
+ *
+ * `git tag` 只能给**已有的提交**打标签。如果「改 package.json」和「打 tag」在一条命令里
+ * 完成，此时版本改动**还没提交**，tag 就会指向一个 `package.json` 里还是**旧版本号**的提交
+ * —— 版本号与 tag 对不上。所以正确顺序必然是两步：
+ *
+ * ```sh
+ * npm run version:bump                    # 1) 改版本号
+ * git add -A && git commit -m "..."       # 2) 提交
+ * npm run version:bump -- --tag           # 3) 提交之后才打 tag
+ * ```
+ *
+ * `--tag` 会校验 package.json 相对 HEAD 没有未提交改动，否则拒绝打 tag。
  *
  * ## 为什么能直接 import 一个 `.ts`
  *
@@ -24,7 +39,9 @@
  * 另一套」的漂移。下面有 Node 版本守卫，老版本 Node 会得到明确提示而不是费解的报错。
  */
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -47,21 +64,25 @@ function supportsTypeScriptImport() {
 if (!supportsTypeScriptImport()) {
   console.error(
     `本脚本需要 Node 22.18+（当前 ${process.versions.node}），因为要直接 import ` +
-      `src/services/version.ts。请升级 Node，或改用 --set 手动改 package.json。`,
+      `src/services/version.ts。请升级 Node，或手动改 package.json。`,
   );
   process.exit(1);
 }
 
 const {
   RELEASE_STAGES,
+  STABLE_TARGET,
   bumpNumeric,
   compareVersions,
   formatVersion,
+  isStable,
   nextIteration,
   parseVersion,
   promoteStage,
   setStage,
 } = await import('../src/services/version.ts');
+
+const STAGE_CHOICES = [...RELEASE_STAGES, STABLE_TARGET];
 
 const USAGE = `版本号推进脚本
 
@@ -69,18 +90,23 @@ const USAGE = `版本号推进脚本
   node scripts/bump-version.mjs [选项]
 
 选项：
-  --promote                推进到下一个更高的稳定性阶段（序号归零）
-  --stage <name>           切换到指定阶段（${RELEASE_STAGES.join(' | ')}）
+  --promote                推进到下一个更高的稳定性阶段；从 rc 推进则成为稳定版
+  --stage <name>           切换到指定阶段：${STAGE_CHOICES.join(' | ')}
+                           （stable 即去掉后缀成为稳定版）
   --allow-downgrade        允许把阶段往回退（默认拒绝）
-  --numeric <part>         增加数字版本：major | minor | patch（仅大规模更新）
+  --numeric <part>         增加数字版本：major | minor | patch
+                           （大规模更新，或稳定版之后的任何改动）
   --keep-stage             --numeric 时保留当前阶段（默认重置为 alpha0）
   --set <version>          显式指定版本号（仍会校验格式）
-  --tag                    改完后打 git tag v<版本号>
+  --tag                    只给 package.json 里的当前版本打 tag v<版本号>，不改版本号
   --dry-run                只打印将要变成什么，不写文件
   --json                   以 JSON 输出结果
   -h, --help               显示本帮助
 
-不带任何阶段/数字选项时，默认行为是「同阶段序号 +1」，即日常的功能与修复。`;
+不带任何阶段/数字选项时，默认行为是「同一阶段序号 +1」，即日常的功能与修复。
+
+阶段从低到高：${RELEASE_STAGES.join(' < ')} < 稳定版（裸版本，如 0.1.0）。
+推进阶段时序号归零；成为稳定版时后缀整体消失。`;
 
 /**
  * 解析命令行参数。
@@ -177,8 +203,8 @@ function resolveNextVersion(current, options) {
   }
   if (options.stage !== null) {
     const stage = String(options.stage);
-    if (!RELEASE_STAGES.includes(stage)) {
-      throw new Error(`--stage 只能是 ${RELEASE_STAGES.join(' | ')}，收到：${stage}`);
+    if (!STAGE_CHOICES.includes(stage)) {
+      throw new Error(`--stage 只能是 ${STAGE_CHOICES.join(' | ')}，收到：${stage}`);
     }
     return setStage(current, stage, options.allowDowngrade);
   }
@@ -210,6 +236,76 @@ function replaceVersionInText(raw, version) {
   return raw.replace(pattern, `$1${version}$3`);
 }
 
+/**
+ * 运行一条 git 命令并返回标准输出。
+ *
+ * 用 `stdio: 'pipe'` 读取输出，但**捕获失败时不要重试**：本机受限模式下 Node 的
+ * `child_process` 用管道 stdio 会 EPERM，此时需要放宽沙箱权限，换写法没有意义。
+ *
+ * @param args git 参数。
+ * @returns 标准输出文本（已去首尾空白）。
+ */
+function git(args) {
+  return execFileSync('git', args, { encoding: 'utf8' }).trim();
+}
+
+/**
+ * 「只打 tag」模式。
+ *
+ * 关键校验：package.json 相对 HEAD **不能有未提交改动**，否则 tag 会指向一个版本号
+ * 与 tag 名不一致的提交。
+ *
+ * @param version 要打 tag 的版本号。
+ * @param dryRun 是否只预览。
+ */
+function tagCurrentVersion(version, dryRun) {
+  const tagName = `v${version}`;
+
+  const dirty = git(['status', '--porcelain', '--', 'package.json']);
+  if (dirty !== '') {
+    throw new Error(
+      `package.json 有未提交的改动，此时打 tag 会指向版本号还是旧值的提交。` +
+        `请先提交，再运行本命令。`,
+    );
+  }
+
+  const headVersion = JSON.parse(git(['show', 'HEAD:package.json'])).version;
+  if (headVersion !== version) {
+    throw new Error(
+      `HEAD 里的版本号是 ${headVersion}，与工作区的 ${version} 不一致（工作区可能未同步）。`,
+    );
+  }
+
+  const existing = git(['tag', '-l', tagName]);
+  if (existing !== '') {
+    throw new Error(`tag ${tagName} 已存在。`);
+  }
+
+  if (dryRun) {
+    console.log(`[dry-run] 将创建 annotated tag ${tagName}（指向 ${git(['rev-parse', '--short', 'HEAD'])}）`);
+    return;
+  }
+
+  // tag 说明信息写临时文件再用 -F 传入：避免中文经命令行参数被编码破坏。
+  const messagePath = join(tmpdir(), `astra-tag-${Date.now()}.txt`);
+  writeFileSync(
+    messagePath,
+    `AstraChat ${version}\n\n由 scripts/bump-version.mjs --tag 创建于提交 ${git(['rev-parse', '--short', 'HEAD'])}。\n`,
+    'utf8',
+  );
+  try {
+    // stdio: 'inherit' —— 本机沙箱下管道式 stdio 会 EPERM（见 README 已知坑 11）
+    execFileSync('git', ['tag', '-a', tagName, '-F', messagePath], { stdio: 'inherit' });
+  } finally {
+    if (existsSync(messagePath)) {
+      unlinkSync(messagePath);
+    }
+  }
+
+  console.log(`已创建 annotated tag ${tagName}`);
+  console.log(`推送：git push origin ${tagName}`);
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
@@ -220,6 +316,20 @@ async function main() {
   const raw = readFileSync(PACKAGE_PATH, 'utf8');
   const currentText = parseVersion(JSON.parse(raw).version);
   const current = formatVersion(currentText);
+
+  // --tag 是独立模式：只打 tag，不改版本号
+  if (options.tag) {
+    const conflicting = options.promote || options.stage !== null || options.numeric !== null || options.set !== null;
+    if (conflicting) {
+      throw new Error(
+        `--tag 不能与改版本号的选项同时使用：tag 只能打给**已提交**的版本。` +
+          `请先改版本号并提交，再单独运行 --tag。`,
+      );
+    }
+    tagCurrentVersion(current, options.dryRun);
+    return;
+  }
+
   const next = resolveNextVersion(currentText, options);
   const nextText = formatVersion(next);
 
@@ -236,15 +346,16 @@ async function main() {
     writeFileSync(PACKAGE_PATH, replaceVersionInText(raw, nextText), 'utf8');
   }
 
-  if (options.tag && !options.dryRun) {
-    // stdio: 'inherit' —— 本机沙箱下管道式 stdio 会 EPERM（见 README 已知坑 11）
-    execFileSync('git', ['tag', `v${nextText}`], { stdio: 'inherit' });
-  }
-
   if (options.json) {
     console.log(
       JSON.stringify(
-        { from: current, to: nextText, stage: next.stage, dryRun: options.dryRun },
+        {
+          from: current,
+          to: nextText,
+          stage: next.stage,
+          stable: isStable(next),
+          dryRun: options.dryRun,
+        },
         null,
         2,
       ),
@@ -254,14 +365,18 @@ async function main() {
 
   const prefix = options.dryRun ? '[dry-run] 将更新' : '已更新';
   console.log(`${prefix} package.json 版本号：${current} → ${nextText}`);
-  if (next.stage !== null && next.iteration === 0 && next.stage !== currentText.stage) {
+  if (isStable(next) && !isStable(currentText)) {
+    console.log('（成为稳定版：后缀整体消失）');
+  } else if (next.stage !== null && next.iteration === 0 && next.stage !== currentText.stage) {
     console.log(`（推进到 ${next.stage} 阶段，序号归零）`);
   }
-  if (options.tag) {
-    console.log(options.dryRun ? `[dry-run] 将打 tag v${nextText}` : `已打 tag v${nextText}`);
-  }
+
   if (!options.dryRun) {
-    console.log('提示：README 的功能描述按「数字版本线」叙述，通常无需随阶段后缀改动。');
+    console.log('');
+    console.log('后续步骤：');
+    console.log(`  1. git add -A && git commit -m "..."`);
+    console.log(`  2. npm run version:bump -- --tag    # 提交之后再打 tag v${nextText}`);
+    console.log('（README 的功能描述按「数字版本线」叙述，通常无需随阶段后缀改动。）');
   }
 }
 

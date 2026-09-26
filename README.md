@@ -56,15 +56,23 @@ npm start            # 生产形态：先构建再用打包产物启动
 | `npm run smoke` | **端到端冒烟测试**：启动真实 Electron，走完整聊天链路并断言结果 |
 | `npm run package` | 只产出未打包目录 `release/win-unpacked/`（调试用，**里面的 exe 不能单独拷出来跑**） |
 | `npm run dist` | 产出可分发文件并收集到 `releases/`：免安装单文件 + 安装版 |
-| `npm run version:bump` | 推进版本号（日常 = 同阶段序号 +1；`--promote` 推进阶段；`--numeric` 大规模更新） |
+| `npm run version:bump` | 推进版本号（日常 = 同阶段序号 +1；`--promote` 推进阶段；`--numeric` 大规模更新；`--tag` 提交后打 tag） |
 
 ### 版本号规则
 
 规则、阶段含义与全部 `version:bump` 选项见 **[docs/versioning.md](docs/versioning.md)**。摘要：
 
-- 格式 `<major>.<minor>.<patch>-<stage><序号>`，例如 `0.1.0-alpha0`（当前版本）
-- 阶段从低到高：`alpha` < `beta` < `rc` < `lts`；**推进阶段时序号归零**（`alpha3` → `beta0`）
-- **数字版本只在「大规模更新」时增加**，平时的功能与修复只动阶段内序号
+- 预发布格式 `<major>.<minor>.<patch>-<stage><序号>`，例如 `0.1.0-alpha1`（当前版本）；
+  **稳定版（LTS）就是不加后缀的裸版本**，例如 `0.1.0`
+- 稳定性从低到高：`alpha` < `beta` < `rc` < **稳定版**；**推进阶段时序号归零**
+  （`alpha3` → `beta0`），`rc` 再推进则后缀整体消失（`rc2` → `0.1.0`）
+- **数字版本只在「大规模更新」时增加**，平时的功能与修复只动阶段内序号。
+  唯一例外：稳定版已冻结，之后的任何改动必须开新的数字版本线
+  （修 BUG `--numeric patch` → `0.1.1-alpha0`）
+- 稳定版不带 `-ltsN` 后缀，是因为 semver 里带后缀的版本排序**低于**同号裸版本
+  （`0.1.0-lts0 < 0.1.0`）—— 用裸版本表示稳定版，规则与 semver 排序才一致
+- 打 tag 必须两步：`version:bump` → 提交 → `version:bump -- --tag`
+  （tag 只能打给已提交的版本，否则 tag 会指向版本号还是旧值的提交）
 - `package.json` 是版本号唯一真源；`tests/version-rules.spec.ts` 里有守卫用例，
   版本号写歪了 `npm test` 就会红
 
