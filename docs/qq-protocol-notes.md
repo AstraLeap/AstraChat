@@ -68,6 +68,11 @@ token，偶尔多取一次也不会造成失效。安全余量取 60 秒对齐�
 - 业务接口带版本前缀：如 `POST /v2/groups/{group_openid}/messages`
 - 凭证接口**不带** `/v2`：`POST /app/getAppAccessToken`
 
+> ⚠️ **WebSocket 的域名不等于 REST 域名。** 2026-09-26 用真实账号实测，
+> `/gateway/bot` 返回的是 `wss://api.sgroup.qq.com/websocket`，而文档示例写的是
+> `wss://api.bot.qq.com/websocket/`。**因此网关地址必须用接口返回值，绝不能硬编码**
+> —— 实现里就是这么做的（`getGatewayUrl` 每次连接前重新取）。
+
 > 沙箱环境：本次取证未拿到沙箱与正式环境域名差异的确切说明（见 §9）。目前实现只支持
 > 正式环境 base，沙箱与否通过配置保留位置。
 
@@ -95,6 +100,21 @@ Content-Type: application/json
 
 另有不带分片信息的 `GET /gateway`（来源：[获取通用 WSS 接入点](https://bot.q.qq.com/wiki/develop/api-v2/openapi/wss/url_get.html)）。
 实现采用 `/gateway/bot`，因为顺便拿到分片数与连接额度。
+
+### 3.1 真实账号实测到的值（2026-09-26，`scripts/qq-probe.mjs`）
+
+| 项 | 文档示例 | 实测 |
+|---|---|---|
+| `url` | `wss://api.bot.qq.com/websocket/` | **`wss://api.sgroup.qq.com/websocket`** |
+| `shards` | 9 / 1 | 1 |
+| `session_start_limit.total` | 1000 | **1500** |
+| `session_start_limit.remaining` | 999 | 1500 |
+| `session_start_limit.max_concurrency` | 1 | 1 |
+| Hello 的 `heartbeat_interval` | 45000 | **41250** |
+
+**结论：这些值都是服务端下发的，文档示例只是示例。** 心跳周期必须用 Hello 给的值
+（不是常量 45 秒），网关地址必须用接口返回值（不是常量域名）—— 两处实现都已照做，
+测试也覆盖了「用 Hello 给的周期发心跳」。
 
 ---
 
@@ -269,7 +289,14 @@ GROUP_AND_C2C_EVENT (1 << 25)
 
 `GROUP_AND_C2C_EVENT (1<<25)` **不在**基础事件列表里，即可能需要申请。
 
-**实现含义**：
+> ✅ **2026-09-26 实测：`1<<25` 有权限，无需额外申请。**
+> 用真实账号以 `intents = 33554432` 发 Identify，网关直接返回 READY
+> （机器人「笙澜」鉴权成功）。所以这一条**不构成阻塞**。
+>
+> 两处官方文档关于「全量群消息属于哪个 intent」的矛盾仍未解（§5.1），
+> 但那是**事件归属**问题，不是**权限**问题——权限这关已经过了。
+
+**实现含义**（仍然照做，因为其它 intents 位值或将来权限变更都可能触发）：
 1. 订阅的 intents 必须可配置（我们已有 `qq_config.intents`）。
 2. 收到 close code `4013` / `4014` 时，必须给出**明确可操作**的提示
    （「intents 无权限，请到开放平台申请」），而不是笼统的「连接失败」。
@@ -395,10 +422,10 @@ GROUP_AND_C2C_EVENT (1 << 25)
 ## 9. 不确定与坑（**必须真实账号验证，不要当成事实**）
 
 1. **`GROUP_MESSAGE_CREATE` 的 intent 到底是哪个** —— §5.1 的两处官方说法不一致。
-   可能实际是 `1<<25`，也可能需要额外申请位。
-2. **`GROUP_AND_C2C_EVENT (1<<25)` 是否需要申请** —— 文档说特殊事件需申请且无权限会直接断连；
-   该位不在基础事件列表内。若需申请而用户没申请，表现是**连接建立后立刻被关闭**，
-   我们只能靠 close code `4013`/`4014` 给出提示。
+   可能是 `1<<25`，也可能还需要额外申请位。
+   **权限本身已实测通过**（见 §5.2），剩下的是「全量模式开关是否真的会推事件」，
+   需要 `node scripts/qq-probe.mjs --listen 60` 期间**有人往群里发一条不 @ 机器人的消息**来验证。
+2. ~~**`GROUP_AND_C2C_EVENT (1<<25)` 是否需要申请**~~ —— ✅ 实测**不需要**，已解。
 3. **沙箱环境的域名** —— 本次未取证到沙箱 REST / WSS 域名差异。配置里有 `sandbox` 字段但
    目前未参与 URL 选择。
 4. **单聊发送接口的字段细节** —— 未逐字段取证，按与群发送同构实现。
