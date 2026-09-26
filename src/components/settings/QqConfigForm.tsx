@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useQqStore } from '../../stores/useQqStore';
-import type { QqConfig, QqConnectionStatus } from '../../types/index';
+import { useQqConnection } from './useQqConnection';
+import type { QqConfig, QqConnectionState } from '../../types/index';
 import { Badge, Button, Field, IconWarning, Input, type BadgeTone } from '../ui';
 import { hasSecret, maskSecret } from './mask';
 import QqContactList from './QqContactList';
@@ -34,11 +35,17 @@ interface QqDraft {
   maxReplyChars: string;
 }
 
-/** 连接状态 → 徽章文案与语义色。 */
-const STATUS_META: Record<QqConnectionStatus, { label: string; tone: BadgeTone }> = {
-  disconnected: { label: '未连接', tone: 'neutral' },
-  connected: { label: '已连接（模拟）', tone: 'success' },
-  error: { label: '错误', tone: 'danger' },
+/**
+ * **实时**连接状态 → 徽章文案与语义色。
+ *
+ * 注意用的是 `QqConnectionState`（运行期，4 值）而不是 `QqConnectionStatus`
+ * （落库，3 值）—— 界面上要显示的是「现在到底连上没有」，不是上次落库的快照。
+ */
+const LIVE_STATUS_META: Record<QqConnectionState, { label: string; tone: BadgeTone }> = {
+  stopped: { label: '未连接', tone: 'neutral' },
+  connecting: { label: '连接中…', tone: 'neutral' },
+  connected: { label: '已连接', tone: 'success' },
+  error: { label: '连接错误', tone: 'danger' },
 };
 
 /** 数字字段的取值范围，与数据库层的夹取区间保持一致。 */
@@ -86,13 +93,18 @@ export default function QqConfigForm() {
   const counts = useQqStore((state) => state.counts);
   const loading = useQqStore((state) => state.loading);
   const saving = useQqStore((state) => state.saving);
-  const toggling = useQqStore((state) => state.togglingConnection);
   const error = useQqStore((state) => state.error);
   const load = useQqStore((state) => state.load);
   const save = useQqStore((state) => state.save);
-  const connect = useQqStore((state) => state.connect);
-  const disconnect = useQqStore((state) => state.disconnect);
   const clearError = useQqStore((state) => state.clearError);
+
+  // 真实连接状态来自主进程（不是 store 里那份落库状态）
+  const {
+    status: liveStatus,
+    busy: connecting,
+    connect,
+    disconnect,
+  } = useQqConnection();
 
   const [draft, setDraft] = useState<QqDraft>(() => toDraft(config));
   /** 是否有未保存的修改；为真时不会被 store 的推送覆盖，避免连接状态切换吃掉用户输入。 */
@@ -204,8 +216,10 @@ export default function QqConfigForm() {
     }
   }
 
-  const statusMeta = STATUS_META[config.status];
-  const isConnected = config.status === 'connected';
+  const statusMeta = LIVE_STATUS_META[liveStatus.state];
+  // 连接中也算「已连接」：按钮显示「断开」，避免用户在重连过程中反复点「连接」
+  const isConnected =
+    liveStatus.state === 'connected' || liveStatus.state === 'connecting';
 
   /** 启用但没有任何已授权来源、又没打开「放行全部」→ 实际上不会回应任何人。 */
   const blockedByPolicy =
@@ -225,7 +239,7 @@ export default function QqConfigForm() {
           <Button
             size="sm"
             variant={isConnected ? 'secondary' : 'primary'}
-            loading={toggling}
+            loading={connecting}
             onClick={() => void (isConnected ? disconnect() : connect())}
           >
             {isConnected ? '断开' : '连接'}
@@ -238,13 +252,14 @@ export default function QqConfigForm() {
         role="note"
         className="rounded-md border border-[var(--astra-accent)]/30 bg-[var(--astra-accent-soft)] px-3 py-2 text-[11px] leading-relaxed text-[var(--astra-text)]"
       >
-        <strong className="font-semibold">当前版本仅保存配置，尚未实现真实连接。</strong>{' '}
-        「连接 / 断开」只切换上面的状态标记，不会与 QQ 服务器建立任何连接，也不会收发任何消息；
-        下面的「已发现的来源」需要在真实连接建立后才会出现内容。
+        <strong className="font-semibold">连接是真实的，消息处理还没接线。</strong>{' '}
+        点「连接」会与 QQ 开放平台建立真实连接，状态与机器人身份都来自服务端；
+        但「收到消息 → 问模型 → 自动回复」这条链路尚未接线，收到的事件只会写进主进程日志。
+        下面的「已发现的来源」要在消息处理接线后才会出现内容。
       </p>
 
-      {config.statusMessage ? (
-        <p className="text-[11px] text-[var(--astra-muted)]">状态说明：{config.statusMessage}</p>
+      {liveStatus.message ? (
+        <p className="text-[11px] text-[var(--astra-muted)]">状态说明：{liveStatus.message}</p>
       ) : null}
 
       {loading ? <p className="text-[11px] text-[var(--astra-muted)]">正在读取配置…</p> : null}
