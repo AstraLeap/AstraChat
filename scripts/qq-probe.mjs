@@ -71,6 +71,9 @@ const {
   qqBotToken,
 } = await import('../src/services/qq/protocol.ts');
 
+// 复用本项目的解析器，让探针同时成为「events.ts 对真实数据是否成立」的实测
+const { parseInboundEvent } = await import('../src/services/qq/events.ts');
+
 const TOKEN_URL = 'https://api.bot.qq.com/app/getAppAccessToken';
 const GATEWAY_URL = 'https://api.bot.qq.com/gateway/bot';
 
@@ -89,6 +92,7 @@ const USAGE = `QQ 开放平台连通性与 intents 权限探针
 选项：
   --intents <数字>   要测的 intents 位掩码，默认 ${INTENT_GROUP_AND_C2C}（GROUP_AND_C2C_EVENT = 1<<25）
   --listen <秒>      收到 READY 后继续监听事件若干秒（默认 0，即立刻退出）
+  --dump             打印每个事件的原始载荷（排查字段名与结构时用）
   --timeout <秒>     整体超时，默认 30
   -h, --help         显示本帮助
 
@@ -108,6 +112,7 @@ function parseArgs(argv) {
     intents: INTENT_GROUP_AND_C2C,
     listen: 0,
     timeout: 30,
+    dump: false,
     help: false,
   };
 
@@ -136,6 +141,9 @@ function parseArgs(argv) {
         break;
       case '--timeout':
         options.timeout = Number(value());
+        break;
+      case '--dump':
+        options.dump = true;
         break;
       case '-h':
       case '--help':
@@ -252,7 +260,7 @@ async function fetchGateway(token) {
  * @param listenSeconds 收到 READY 后再监听多少秒事件。
  * @returns 进程退出码。
  */
-function probeGateway(url, token, intents, listenSeconds) {
+function probeGateway(url, token, intents, listenSeconds, dumpPayload) {
   console.log('');
   console.log('── 3/3 连接网关并 Identify ───────────────────────');
   console.log(`   测试 intents = ${intents}（1<<25 = ${INTENT_GROUP_AND_C2C}）`);
@@ -274,6 +282,8 @@ function probeGateway(url, token, intents, listenSeconds) {
     let eventCount = 0;
     /** 监听开始时刻。 */
     let listenStart = 0;
+    /** 机器人自己的 id（来自 READY），用于判断群消息有没有 @ 它。 */
+    let botId = null;
 
     const socket = new WebSocket(url);
 
@@ -347,6 +357,7 @@ function probeGateway(url, token, intents, listenSeconds) {
         ready = true;
         line('✅', '鉴权成功，收到 READY');
         if (readyInfo) {
+          botId = readyInfo.userId || null;
           console.log(`   机器人：${readyInfo.username || '(无名字)'}（id ${readyInfo.userId || '?'}）`);
           console.log(`   session_id：${readyInfo.sessionId}`);
         }
@@ -398,10 +409,40 @@ function probeGateway(url, token, intents, listenSeconds) {
         eventCount += 1;
         console.log(`   📨 收到事件：${payload.t ?? '(无 t)'}`);
         if (payload.t === 'GROUP_MESSAGE_CREATE') {
-          console.log('      ⭐ 这就是全量群消息！说明 1<<25 + 「接收所有消息」开关都生效了。');
+          console.log('      全量群消息（开启全量模式后，@ 消息也会走这个类型）');
+          console.log('      → 是否 @ 了机器人只能看 mentions 里有没有机器人 id');
         }
         if (payload.t === 'GROUP_AT_MESSAGE_CREATE') {
-          console.log('      （这是 @ 机器人的消息，属于基础路径）');
+          console.log('      @ 机器人的消息（只在未开启全量模式时出现这个类型）');
+        }
+
+        // 用**本项目的解析器**判定一次，验证 events.ts 对真实数据是否成立
+        const parsed = parseInboundEvent(payload, botId === null ? {} : { botId });
+        if (parsed === null) {
+          console.log('      ⚠️ 本项目解析器返回 null（缺消息 id 或来源标识，无法回应）');
+        } else {
+          console.log(
+            `      本项目解析：${parsed.kind}｜openId=${parsed.openId}｜` +
+              `指向机器人=${parsed.addressedToBot ? '是 ✅' : '否'}`,
+          );
+          console.log(
+            `                  角色=${parsed.senderRole ?? '无'}｜发送者=${parsed.senderName ?? '未知'}` +
+              `｜正文=${JSON.stringify(parsed.content.slice(0, 60))}`,
+          );
+          if (parsed.quote !== null) {
+            console.log(`                  引用了 ${parsed.quote.senderName ?? '某人'}：${JSON.stringify(parsed.quote.text.slice(0, 40))}`);
+          }
+          if (parsed.attachments.length > 0) {
+            console.log(
+              `                  附件 ${parsed.attachments.length} 个：${parsed.attachments
+                .map((item) => item.contentType || '未知类型')
+                .join(', ')}`,
+            );
+          }
+        }
+
+        if (dumpPayload) {
+          console.log(`      原始载荷 d：${JSON.stringify(payload.d)}`);
         }
         return;
       }
@@ -475,7 +516,7 @@ async function main() {
     return 1;
   }
 
-  return probeGateway(url, token, options.intents, Math.max(0, options.listen));
+  return probeGateway(url, token, options.intents, Math.max(0, options.listen), options.dump);
 }
 
 main()
