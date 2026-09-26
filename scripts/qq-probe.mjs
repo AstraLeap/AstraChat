@@ -266,6 +266,14 @@ function probeGateway(url, token, intents, listenSeconds) {
     let ready = false;
     /** 监听阶段的收尾定时器。 */
     let listenTimer = null;
+    /** 监听阶段的存活显示定时器。 */
+    let statusTimer = null;
+    /** 已发出的心跳数（用于证明连接是活的）。 */
+    let heartbeatCount = 0;
+    /** 已收到的事件数。 */
+    let eventCount = 0;
+    /** 监听开始时刻。 */
+    let listenStart = 0;
 
     const socket = new WebSocket(url);
 
@@ -280,6 +288,9 @@ function probeGateway(url, token, intents, listenSeconds) {
       }
       if (listenTimer !== null) {
         clearTimeout(listenTimer);
+      }
+      if (statusTimer !== null) {
+        clearInterval(statusTimer);
       }
       try {
         socket.close();
@@ -319,6 +330,7 @@ function probeGateway(url, token, intents, listenSeconds) {
         heartbeatTimer = setInterval(() => {
           try {
             socket.send(JSON.stringify(buildHeartbeatPayload(latestSeq)));
+            heartbeatCount += 1;
           } catch {
             // 连接可能已关，忽略
           }
@@ -351,16 +363,39 @@ function probeGateway(url, token, intents, listenSeconds) {
 
         console.log('');
         console.log(`   开始监听事件 ${listenSeconds} 秒…`);
-        console.log('   👉 现在请往群里发一条**不 @ 机器人**的普通消息，观察是否出现 GROUP_MESSAGE_CREATE');
+        console.log('   请做两件事，各发一条消息：');
+        console.log('     ① 普通消息（完全不 @ 机器人）→ 期望 GROUP_MESSAGE_CREATE（全量模式）');
+        console.log('     ② @ 一下机器人                → 期望 GROUP_AT_MESSAGE_CREATE（基础路径）');
+        console.log('   ⏱️  每 15 秒会报一次存活情况，用来区分「掉线了」与「在线但没事件」');
+        listenStart = Date.now();
+        statusTimer = setInterval(() => {
+          const elapsed = Math.round((Date.now() - listenStart) / 1000);
+          console.log(
+            `   ⏱️  已监听 ${elapsed}s｜心跳 ${heartbeatCount} 次｜事件 ${eventCount} 个` +
+              (eventCount === 0 ? '（连接正常，只是还没收到事件）' : ''),
+          );
+        }, 15_000);
         listenTimer = setTimeout(() => {
+          if (statusTimer !== null) {
+            clearInterval(statusTimer);
+            statusTimer = null;
+          }
           console.log('');
-          console.log(`   监听结束（${listenSeconds} 秒）。`);
+          console.log(`   监听结束：心跳 ${heartbeatCount} 次，事件 ${eventCount} 个。`);
+          if (eventCount === 0) {
+            console.log('   ❌ 一个事件都没收到。');
+            console.log('      连接是活的（心跳正常发出且没被断开），所以不是掉线或鉴权问题。');
+            console.log('      需要排查：机器人是否还在该群里、该事件是否需要额外订阅权限。');
+          } else {
+            console.log('   ✅ 连接与事件投递都正常（请对照上面打印的事件名判断是全量还是仅 @）。');
+          }
           finish(0);
         }, listenSeconds * 1000);
         return;
       }
 
       if (payload.op === OP.DISPATCH) {
+        eventCount += 1;
         console.log(`   📨 收到事件：${payload.t ?? '(无 t)'}`);
         if (payload.t === 'GROUP_MESSAGE_CREATE') {
           console.log('      ⭐ 这就是全量群消息！说明 1<<25 + 「接收所有消息」开关都生效了。');
