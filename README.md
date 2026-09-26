@@ -56,6 +56,17 @@ npm start            # 生产形态：先构建再用打包产物启动
 | `npm run smoke` | **端到端冒烟测试**：启动真实 Electron，走完整聊天链路并断言结果 |
 | `npm run package` | 只产出未打包目录 `release/win-unpacked/`（调试用，**里面的 exe 不能单独拷出来跑**） |
 | `npm run dist` | 产出可分发文件并收集到 `releases/`：免安装单文件 + 安装版 |
+| `npm run version:bump` | 推进版本号（日常 = 同阶段序号 +1；`--promote` 推进阶段；`--numeric` 大规模更新） |
+
+### 版本号规则
+
+规则、阶段含义与全部 `version:bump` 选项见 **[docs/versioning.md](docs/versioning.md)**。摘要：
+
+- 格式 `<major>.<minor>.<patch>-<stage><序号>`，例如 `0.1.0-alpha0`（当前版本）
+- 阶段从低到高：`alpha` < `beta` < `rc` < `lts`；**推进阶段时序号归零**（`alpha3` → `beta0`）
+- **数字版本只在「大规模更新」时增加**，平时的功能与修复只动阶段内序号
+- `package.json` 是版本号唯一真源；`tests/version-rules.spec.ts` 里有守卫用例，
+  版本号写歪了 `npm test` 就会红
 
 ### 打包分发（`releases/`）
 
@@ -67,8 +78,11 @@ npm run dist
 
 | 文件 | 大小 | 说明 |
 |------|------|------|
-| `releases/AstraChat-0.1.0-x64-portable.exe` | ≈115 MB | **免安装单文件，双击直接启动**。自解压到临时目录后运行，不写注册表、不建快捷方式。分发首选。 |
-| `releases/AstraChat-0.1.0-x64-setup.exe` | ≈115 MB | NSIS 安装版：可选安装目录、建开始菜单与桌面快捷方式、带卸载程序。 |
+| `releases/AstraChat-<版本>-x64-portable.exe` | ≈115 MB | **免安装单文件，双击直接启动**。自解压到临时目录后运行，不写注册表、不建快捷方式。分发首选。 |
+| `releases/AstraChat-<版本>-x64-setup.exe` | ≈115 MB | NSIS 安装版：可选安装目录、建开始菜单与桌面快捷方式、带卸载程序。 |
+
+`<版本>` 就是 `package.json` 里的版本号（含阶段后缀），例如
+`AstraChat-0.1.0-alpha0-x64-portable.exe`。规则见 [docs/versioning.md](docs/versioning.md)。
 
 **⚠️ 不要从 `release/win-unpacked/` 里单独拷 `AstraChat.exe` 去分发。** 那个 exe 必须和同目录的
 `resources/`、`*.dll`、`*.pak` 待在一起才能启动，单独拷出来双击只会报错。要免安装就用
@@ -248,6 +262,38 @@ npm run package
 ```
 
 > 注意这是**网络问题不是代码问题**：`npm run build`、`npm test`、`npm run smoke` 都不需要联网。
+
+#### 附：另一个长得像但成因不同的失败 —— `win-unpacked.tmp` 改名 EPERM
+
+打包时还可能报：
+
+```
+⨯ EPERM: operation not permitted, rename 'release\win-unpacked.tmp' -> 'release\win-unpacked'
+```
+
+**先别急着怀疑权限**。这个和上面那条 GitHub 超时是两回事，实测结论：
+
+- `release/` 目录**可写**，且**没有任何残留 electron / AstraChat 进程**时也会发生；
+- 出错后手工 `Rename-Item release\win-unpacked.tmp win-unpacked` **会成功**。
+
+所以它是 electron-builder 解压完 400 MB Electron 载荷后那一下 rename **被瞬时占用**
+（典型是新解压目录正被杀软实时扫描），属于时序竞争而非权限或句柄泄漏。
+
+两种走法（都实测可用）：
+
+```powershell
+# 走法 1：手工补上那一步改名，然后直接再跑一次 builder（它会跳过解压）
+Rename-Item release\win-unpacked.tmp win-unpacked
+npx electron-builder
+
+# 走法 2：整个删掉重来（若 tmp 不完整）
+Get-Process electron,AstraChat -ErrorAction SilentlyContinue | Stop-Process -Force
+Remove-Item release -Recurse -Force
+npm run dist
+```
+
+> 注意走法 1 里 `npx electron-builder` 而不是 `npm run dist`：`dist` 会先重跑 `build`，
+> 而这一步跟打包失败无关，没必要重来。
 > 另外 electron-builder 的下载缓存不在本项目里（`ELECTRON_BUILDER_CACHE` 未生效），
 > 每次打包都可能重新下载，因此建议把上面两个变量固化成用户级环境变量。
 
@@ -342,6 +388,25 @@ rg '[\x{1F000}-\x{1FAFF}\x{2600}-\x{27BF}\x{2B00}-\x{2BFF}\x{FE0F}\x{2726}\x{271
 界面显示「已允许」而库里是 `none` 是安全边界上最危险的不一致。
 `tests/qq-store.spec.ts` 有一条用例专门锁住这个行为。设计细节见
 [docs/qq-integration-design.md](docs/qq-integration-design.md)。
+
+### 11. `scripts/` 里的脚本为什么能 `import` 一个 `.ts`（附沙箱下 `stdio` 的 EPERM）
+
+`scripts/bump-version.mjs` 里有一行 `await import('../src/services/version.ts')` —— 直接
+import 了一个 TypeScript 文件。这是**故意**的：
+
+- Node 22.18+ 默认启用「类型擦除」，可以原生 import TS。好处是版本规则的实现**只存在一份**
+  （`src/services/version.ts`），脚本与单测共用，不需要编译步骤，也不必给 tsconfig 开
+  `allowJs`（`scripts/**/*.mjs` 虽然写在 `include` 里，但没开 `allowJs` 时其实不参与类型检查，
+  所以脚本里的逻辑**没有**类型保障 —— 把逻辑放进 TS 才是拿到保障的唯一办法）。
+- 代价有两个，都在预期内：
+  1. 要求 **Node ≥ 22.18**（已写进 `package.json` 的 `engines`）。脚本开头有版本守卫，
+     老版本会得到明确提示而不是费解的语法报错。
+  2. 被 import 的 TS 只能用**可擦除语法** —— 不能有 `enum`、`namespace`、构造函数参数属性。
+     `src/services/version.ts` 满足这个约束（全是函数 + interface + type 别名）。
+
+另外记一条本机沙箱的坑：Node 的 `child_process` 用默认 `stdio: 'pipe'` 会 `EPERM`
+（受限模式下不能开命名管道），所以 `--tag` 走 `execFileSync('git', ..., { stdio: 'inherit' })`。
+PowerShell 自己的管道不受影响，但 Node 捕获子进程输出会直接失败。
 
 ---
 

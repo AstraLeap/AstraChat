@@ -1,7 +1,7 @@
 {
   "name": "astra-chat",
   "productName": "AstraChat",
-  "version": "0.1.0",
+  "version": "0.1.0-alpha0",
   "description": "AstraChat —— 星辰跃动工作室出品的轻量级多模型 AI 聊天客户端",
   "author": "星辰跃动工作室 (XingChenYueDong Studio)",
   "license": "MIT",
@@ -9,7 +9,7 @@
   "type": "module",
   "main": "dist/electron/main.cjs",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.18.0"
   },
   "scripts": {
     "postinstall": "node scripts/ensure-electron.mjs",
@@ -23,7 +23,8 @@
     "start": "npm run build && electron .",
     "smoke": "npm run build && node scripts/smoke.mjs",
     "package": "npm run build && electron-builder --dir",
-    "dist": "npm run build && electron-builder && node scripts/publish-releases.mjs"
+    "dist": "npm run build && electron-builder && node scripts/publish-releases.mjs",
+    "version:bump": "node scripts/bump-version.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3"
