@@ -1,0 +1,18 @@
+# 统一换行符：仓库内一律用 LF，避免 Windows 上 Git 的 autocrlf 把整个仓库
+# 显示成「已修改」，也避免不同平台 clone 后 diff 噪音。
+* text=auto eol=lf
+
+# 二进制资源明确标记，禁止任何换行转换（否则图标会损坏）
+*.png binary
+*.ico binary
+*.icns binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.zip binary
+*.exe binary
+*.node binary
+
+# 锁文件在 diff/merge 里噪音大，且不该被合并策略随意改动
+package-lock.json -diff linguist-generated=true

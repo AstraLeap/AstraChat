@@ -1,0 +1,244 @@
+@import 'tailwindcss';
+
+/*
+ * highlight.js 的代码高亮主题。选择 dark 主题是因为代码块在明暗两种界面下都用深色背景，
+ * 视觉更统一（也是绝大多数聊天客户端的做法）。
+ */
+@import 'highlight.js/styles/github-dark.css';
+
+/*
+ * AstraChat 设计令牌。
+ *
+ * 组件通过 `bg-[var(--astra-surface)]` 这类任意值工具类消费它们，好处是：
+ * 换肤只需改这一处，而不必在几十个组件里改具体色值。
+ */
+:root {
+  --astra-bg: #f5f6fa;
+  --astra-surface: #ffffff;
+  --astra-surface-2: #eef0f7;
+  --astra-border: #dfe3ee;
+  --astra-text: #1a1d26;
+  --astra-muted: #6b7280;
+  --astra-accent: #5b5bd6;
+  --astra-accent-soft: rgba(91, 91, 214, 0.12);
+  --astra-danger: #dc2626;
+  --astra-user-bubble: #5b5bd6;
+  --astra-user-bubble-text: #ffffff;
+  color-scheme: light;
+}
+
+/* 跟随系统深色模式（Electron 会透传原生主题） */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --astra-bg: #0f1117;
+    --astra-surface: #171a23;
+    --astra-surface-2: #1f2330;
+    --astra-border: #2a2f3d;
+    --astra-text: #e6e8ef;
+    --astra-muted: #9aa1b1;
+    --astra-accent: #7c7cf0;
+    --astra-accent-soft: rgba(124, 124, 240, 0.16);
+    --astra-danger: #f87171;
+    --astra-user-bubble: #4f4fc4;
+    --astra-user-bubble-text: #ffffff;
+    color-scheme: dark;
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--astra-bg);
+  color: var(--astra-text);
+  font-family: 'Segoe UI', 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, 'Helvetica Neue',
+    Arial, sans-serif;
+  font-size: 14px;
+  /* Electron 里禁用整页文本选择更接近原生，但聊天内容必须可选，因此在 body 上放开、
+     在纯 UI 元素（按钮/侧栏）上按需禁用。 */
+  overflow: hidden;
+}
+
+/* 桌面应用不需要页面级滚动条 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--astra-border) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--astra-border);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--astra-muted);
+  background-clip: content-box;
+}
+
+/*
+ * Markdown 正文排版。
+ * react-markdown 输出裸标签，这里给它们一套克制的样式，避免引入 typography 插件。
+ */
+.astra-markdown {
+  line-height: 1.7;
+  word-break: break-word;
+}
+
+.astra-markdown > *:first-child {
+  margin-top: 0;
+}
+
+.astra-markdown > *:last-child {
+  margin-bottom: 0;
+}
+
+.astra-markdown p {
+  margin: 0.5em 0;
+}
+
+.astra-markdown h1,
+.astra-markdown h2,
+.astra-markdown h3,
+.astra-markdown h4 {
+  margin: 1em 0 0.4em;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.astra-markdown h1 {
+  font-size: 1.35em;
+}
+.astra-markdown h2 {
+  font-size: 1.2em;
+}
+.astra-markdown h3 {
+  font-size: 1.08em;
+}
+
+.astra-markdown ul,
+.astra-markdown ol {
+  margin: 0.5em 0;
+  padding-left: 1.4em;
+}
+
+.astra-markdown ul {
+  list-style: disc;
+}
+.astra-markdown ol {
+  list-style: decimal;
+}
+
+.astra-markdown li {
+  margin: 0.2em 0;
+}
+
+.astra-markdown a {
+  color: var(--astra-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.astra-markdown blockquote {
+  margin: 0.6em 0;
+  padding: 0.2em 0.9em;
+  border-left: 3px solid var(--astra-border);
+  color: var(--astra-muted);
+}
+
+.astra-markdown code {
+  font-family: 'Cascadia Code', Consolas, 'Courier New', monospace;
+  font-size: 0.9em;
+}
+
+/* 行内代码 */
+.astra-markdown :not(pre) > code {
+  background: var(--astra-surface-2);
+  border: 1px solid var(--astra-border);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+
+.astra-markdown pre {
+  margin: 0.6em 0;
+  overflow-x: auto;
+  border-radius: 8px;
+  font-size: 12.5px;
+}
+
+.astra-markdown pre code {
+  display: block;
+  padding: 0.9em 1em;
+}
+
+.astra-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.6em 0;
+  font-size: 0.95em;
+}
+
+.astra-markdown th,
+.astra-markdown td {
+  border: 1px solid var(--astra-border);
+  padding: 0.35em 0.6em;
+  text-align: left;
+}
+
+.astra-markdown th {
+  background: var(--astra-surface-2);
+  font-weight: 600;
+}
+
+.astra-markdown hr {
+  border: none;
+  border-top: 1px solid var(--astra-border);
+  margin: 1em 0;
+}
+
+.astra-markdown img {
+  max-width: 100%;
+  border-radius: 6px;
+}
+
+/*
+ * 流式输出时的光标。
+ * 用 inline-block 附着在最后一个字符之后，避免逐帧重排导致整段文字抖动。
+ */
+.astra-caret::after {
+  content: '';
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--astra-accent);
+  animation: astra-caret-blink 1s steps(2, start) infinite;
+}
+
+@keyframes astra-caret-blink {
+  to {
+    visibility: hidden;
+  }
+}
+
+/* 尊重用户的「减少动态效果」偏好 */
+@media (prefers-reduced-motion: reduce) {
+  .astra-caret::after {
+    animation: none;
+  }
+}

@@ -1,0 +1,18 @@
+node_modules/
+dist/
+# electron-builder 的构建工作区（含 win-unpacked 中间产物）
+release/
+# releases/ 里是**可分发产物**，每个约 115 MB —— 不要提交进 git。
+# 需要分发时把 exe 挂到 GitHub Releases（或网盘），而不是塞进仓库历史。
+# 目录本身留在这里，这样 `npm run dist` 的产物能直接双击使用。
+releases/*.exe
+# reference/ 放的是**第三方开源项目源码**（如 qq-bridge），仅供本机阅读参考。
+# 它可能没有许可证（= 默认保留所有权利），把它提交进这个 MIT 仓库会造成授权混淆，
+# 因此整目录排除。zip 与解压内容都留在本地，不影响阅读。
+reference/
+.npm-cache/
+.electron-builder-cache/
+*.log
+*.tsbuildinfo
+.DS_Store
+Thumbs.db

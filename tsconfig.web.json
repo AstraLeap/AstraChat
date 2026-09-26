@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": ["vite/client"],
+    "moduleResolution": "bundler"
+  },
+  "include": [
+    "src/App.tsx",
+    "src/main.tsx",
+    "src/components/**/*.ts",
+    "src/components/**/*.tsx",
+    "src/pages/**/*.ts",
+    "src/pages/**/*.tsx",
+    "src/stores/**/*.ts",
+    "src/types/**/*.ts",
+    "src/global.d.ts"
+  ]
+}

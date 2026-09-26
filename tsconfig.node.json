@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "moduleResolution": "bundler"
+  },
+  "include": [
+    "electron/**/*.ts",
+    "src/types/**/*.ts",
+    "src/db/**/*.ts",
+    "src/services/**/*.ts",
+    "scripts/**/*.mjs",
+    "tests/**/*.ts",
+    "vite.config.ts",
+    "vitest.config.ts"
+  ]
+}

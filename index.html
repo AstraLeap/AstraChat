@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      内容安全策略：Electron 渲染进程不应允许远程脚本与 eval。
+      - `connect-src 'self'` ：渲染进程不直接访问模型 API（请求统一走主进程 fetch，
+        既满足 fetch + ReadableStream 解析 SSE 的要求，又绕开了 CORS）。
+      - style-src 需要 'unsafe-inline'：Tailwind 与 React 内联样式依赖它。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws://localhost:* http://localhost:*"
+    />
+    <title>AstraChat</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

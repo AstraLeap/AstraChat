@@ -1,0 +1,72 @@
+appId: com.xingchenyuedong.astrachat
+productName: AstraChat
+copyright: Copyright © 2026 星辰跃动工作室 (XingChenYueDong Studio)
+
+directories:
+  output: release
+  buildResources: build
+
+# 只打包构建产物与生产依赖；源码、测试、参考文档都不进安装包。
+files:
+  - dist/**/*
+  - package.json
+  - '!**/*.map'
+  - '!**/*.ts'
+
+asar: true
+
+# 关闭 electron-builder 的自动原生模块重编译（关键，别删）。
+#
+# better-sqlite3 v13 起改用 Node-API（node-addon-api），预编译产物直接打在 npm tarball 的
+# prebuilds/ 目录里，**Node 与 Electron 共用同一份二进制**（已实测：Node 24 与 Electron 44
+# 的 ABI 下均能正常读写 SQLite），因此根本不需要 electron-rebuild。
+#
+# 若不关闭，electron-builder 会对 better-sqlite3 触发 `node-gyp rebuild`，在只装了 Node
+# 而没有 MSVC 工具链的机器上必然失败：
+#   Error: Could not find any Visual Studio installation to use
+# 而且本项目路径含空格（"Coding Projects"），node-gyp 还会额外警告路径空格问题。
+npmRebuild: false
+
+# better-sqlite3 是原生模块（.node），无法从 asar 归档内直接 dlopen，
+# 必须解包到 app.asar.unpacked/ 才能被主进程 require 到。
+asarUnpack:
+  - '**/*.node'
+  - node_modules/better-sqlite3/**
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+
+# 两个 Windows 目标各给一个文件名（否则 win.artifactName 会同时套到两者上，
+# 免安装版会被误命名成 *-setup.exe）：
+#   nsis     → 安装版，写注册表、带开始菜单与桌面快捷方式
+#   portable → **免安装单文件**，双击即启动，自解压到临时目录后运行，不写注册表
+nsis:
+  artifactName: ${productName}-${version}-${arch}-setup.${ext}
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: AstraChat
+
+portable:
+  artifactName: ${productName}-${version}-${arch}-portable.${ext}
+  # 免安装版按当前用户权限运行即可，不请求管理员提权。
+  requestExecutionLevel: user
+
+mac:
+  target:
+    - dmg
+  category: public.app-category.social-networking
+
+linux:
+  target:
+    - AppImage
+  category: Network
+  synopsis: 轻量级多模型 AI 聊天客户端
