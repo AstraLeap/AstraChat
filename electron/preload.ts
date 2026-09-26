@@ -49,6 +49,13 @@ function createApi(): AstraApi {
     qq: {
       get: () => ipcRenderer.invoke(IPC_CHANNELS.qq.get),
       save: (patch) => ipcRenderer.invoke(IPC_CHANNELS.qq.save, patch),
+      contactsList: (filter) => ipcRenderer.invoke(IPC_CHANNELS.qq.contactsList, filter),
+      contactsSetPolicy: (openId, policy) =>
+        ipcRenderer.invoke(IPC_CHANNELS.qq.contactsSetPolicy, openId, policy),
+      contactsUpdate: (openId, patch) =>
+        ipcRenderer.invoke(IPC_CHANNELS.qq.contactsUpdate, openId, patch),
+      contactsRemove: (openId) => ipcRenderer.invoke(IPC_CHANNELS.qq.contactsRemove, openId),
+      contactsCounts: () => ipcRenderer.invoke(IPC_CHANNELS.qq.contactsCounts),
     },
     chat: {
       send: (request) => ipcRenderer.invoke(IPC_CHANNELS.chat.send, request),

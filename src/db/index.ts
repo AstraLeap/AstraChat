@@ -40,4 +40,16 @@ export {
   updatePersona,
 } from './personas';
 export { getQqConfig, saveQqConfig } from './qq';
+export {
+  countQqContactsByPolicy,
+  getQqContact,
+  listAllowedOpenIds,
+  listQqContacts,
+  recordQqContactSeen,
+  removeQqContact,
+  setQqContactPolicy,
+  updateQqContact,
+  type ListQqContactsFilter,
+  type RecordQqContactSeenInput,
+} from './qq-contacts';
 export { seedPersonas } from './seed';

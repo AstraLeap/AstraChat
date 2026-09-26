@@ -194,9 +194,13 @@ export type QqConnectionStatus = 'disconnected' | 'connected' | 'error';
 /**
  * QQ bot 配置。
  *
- * v0.1.0 **只做配置存储与界面呈现**：`appId` / `appSecret` / `token` / `groupIds`
- * 落库，「连接 / 断开」按钮只切换本地状态，不会建立任何网络连接。
- * v0.2.0 的真实连接实现应接入 `electron/qq.ts`（预留的适配器接口）。
+ * v0.1.0 **只做配置存储与界面呈现**：「连接 / 断开」按钮只切换本地状态，不建立任何网络连接。
+ * v0.2.0 按 `docs/qq-integration-design.md` 走**官方 QQ 开放平台 Bot API**，真实连接实现在
+ * 主进程（`electron/qq/`）。
+ *
+ * 关于白名单：官方 API 只提供 `openid`（不给 QQ 号 / 群号），因此授权主体记录在
+ * `qq_contacts` 表里（见 {@link QqContact}），本配置只保留**全局策略**。
+ * v0.1.0 的 `groupIds` 单列已在 schema v2 中迁移进 `qq_contacts`。
  */
 export interface QqConfig {
   /** 单例行 id，固定为 `default`。 */
@@ -204,18 +208,112 @@ export interface QqConfig {
   appId: string;
   appSecret: string;
   token: string;
-  /** 允许响应的群号列表（字符串形式，避免超出 JS 安全整数范围）。 */
-  groupIds: string[];
-  /** 是否启用自动回复（v0.2.0 生效）。 */
+  /** 总开关。关闭时不处理任何消息。 */
   enabled: boolean;
   status: QqConnectionStatus;
   /** 状态补充说明，如最近一次错误原因。 */
   statusMessage: string | null;
+  /**
+   * 事件订阅位掩码。
+   *
+   * 要收到**群里全部消息**（不限于 @ 机器人）必须包含 `GROUP_AND_C2C_EVENT`（`1 << 25`）。
+   * 默认 0 表示尚未配置。
+   */
+  intents: number;
+  /** 是否使用沙箱环境（开发期用沙箱，正式发布用正式环境）。 */
+  sandbox: boolean;
+  /** 管理员 openid 列表。管理命令只认这个列表，与模型判断无关。 */
+  ownerOpenIds: string[];
+  /**
+   * 白名单为空时是否放行全部来源。
+   *
+   * **默认 `false`（fail-closed）**：白名单为空时谁都不理，只把来源记进 `qq_contacts`
+   * 等用户授权。打开它等于把机器人账号交给模型，界面上必须给出警示。
+   */
+  allowAllWhenEmpty: boolean;
+  /** 私聊是否应答（仍受 `qq_contacts.policy` 约束）。 */
+  replyInPrivate: boolean;
+  /** 发送前是否做内容审计（拦截本机路径与凭据特征）。 */
+  auditEnabled: boolean;
+  /** 相邻两条消息之间的固定间隔（毫秒），防触发风控。 */
+  sendDelayMs: number;
+  /** 每分钟发送上限。 */
+  maxSendPerMinute: number;
+  /** 每小时发送上限。 */
+  maxSendPerHour: number;
+  /** 单条回复字符上限，超出会按代理对安全切分。 */
+  maxReplyChars: number;
   updatedAt: number;
 }
 
 /** 更新 QQ 配置的入参。 */
 export type UpdateQqConfigInput = Partial<Omit<QqConfig, 'id' | 'updatedAt'>>;
+
+/** 来源类型：群聊或私聊。 */
+export type QqContactKind = 'group' | 'private';
+
+/**
+ * 来源授权三态。
+ *
+ * - `none`：见过但**未授权**（默认）。消息不投递给模型，仅出现在设置页待授权列表里。
+ * - `allow`：允许。消息会投递给模型。
+ * - `deny`：拒绝。**优先级高于 `allow`**，用于临时拉黑某个群/人。
+ */
+export type QqContactPolicy = 'none' | 'allow' | 'deny';
+
+/**
+ * 一个 QQ 来源（群或私聊）。
+ *
+ * 为什么需要这张表：官方 API 的群与用户标识是 `openid`（机器人视角唯一），
+ * 用户**无法预先手填**。所以机器人必须先收到消息、把来源记录下来，用户再到设置页里
+ * 逐个授权。`openId` 对群是 `group_openid`，对私聊是 `user_openid`。
+ */
+export interface QqContact {
+  /** `group_openid` 或 `user_openid`，全局唯一。 */
+  openId: string;
+  kind: QqContactKind;
+  /** 群名 / 昵称；事件里通常没有群名，取不到时为 `null`。 */
+  displayName: string | null;
+  policy: QqContactPolicy;
+  /** 首次见到的时间（Unix 毫秒）。 */
+  firstSeenAt: number;
+  /** 最近一次见到的时间（Unix 毫秒）。 */
+  lastSeenAt: number;
+  /** 累计收到多少条消息，用于列表排序与判断活跃度。 */
+  messageCount: number;
+}
+
+/** 更新来源授权的入参。 */
+export interface UpdateQqContactInput {
+  /** 只允许改授权状态与显示名，来源标识本身不可改。 */
+  policy?: QqContactPolicy;
+  displayName?: string | null;
+}
+
+/**
+ * 列出来源时的过滤条件。
+ *
+ * 放在 `src/types` 而不是 `src/db` 里，是为了让渲染进程也能引用它
+ * （渲染进程不能 import `src/db`，那里依赖 better-sqlite3 原生模块）。
+ */
+export interface ListQqContactsFilter {
+  /** 只看群或只看私聊。 */
+  kind?: QqContactKind;
+  /** 只看某个授权状态。 */
+  policy?: QqContactPolicy;
+}
+
+/** 各授权状态下的来源数量（设置页徽章用）。 */
+export interface QqContactCounts {
+  /** 见过但未授权。 */
+  none: number;
+  /** 已允许。 */
+  allow: number;
+  /** 已拒绝。 */
+  deny: number;
+  /** 总数。 */
+  total: number;
+}
 
 // ---------------------------------------------------------------------------
 // 聊天流式事件

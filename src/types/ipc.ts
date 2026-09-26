@@ -21,15 +21,20 @@ import type {
   CreateMessageInput,
   CreatePersonaInput,
   CreateProviderInput,
+  ListQqContactsFilter,
   Message,
   Persona,
   Provider,
   QqConfig,
+  QqContact,
+  QqContactCounts,
+  QqContactPolicy,
   UpdateConversationInput,
   UpdateMessageInput,
   UpdatePersonaInput,
   UpdateProviderInput,
   UpdateQqConfigInput,
+  UpdateQqContactInput,
 } from './index';
 
 /** 全部 IPC 通道名。 */
@@ -66,6 +71,12 @@ export const IPC_CHANNELS = {
   qq: {
     get: 'qq:get',
     save: 'qq:save',
+    /** 已发现的 QQ 来源（群 / 私聊）及其授权状态。 */
+    contactsList: 'qq:contacts:list',
+    contactsSetPolicy: 'qq:contacts:set-policy',
+    contactsUpdate: 'qq:contacts:update',
+    contactsRemove: 'qq:contacts:remove',
+    contactsCounts: 'qq:contacts:counts',
   },
   chat: {
     /** 发起一次流式回复（invoke，立即返回 streamId）。 */
@@ -123,10 +134,26 @@ export interface AstraApi {
     remove(id: string): Promise<void>;
   };
 
-  /** QQ bot 配置（v0.1.0 仅存储）。 */
+  /**
+   * QQ bot 配置与来源授权。
+   *
+   * v0.1.0 起本模块**只做配置存储**；v0.2.0 的真实连接（官方 Bot API）实现在主进程。
+   * 「来源」指群或私聊：官方 API 只给 `openid`，用户无法预先手填，所以流程是
+   * 「机器人先发现来源 → 用户在设置页授权 → 授权后才把消息投给模型」。
+   */
   qq: {
     get(): Promise<QqConfig>;
     save(patch: UpdateQqConfigInput): Promise<QqConfig>;
+    /** 列出已发现的来源，按最近活动倒序。 */
+    contactsList(filter?: ListQqContactsFilter): Promise<QqContact[]>;
+    /** 设置某个来源的授权状态（`none` / `allow` / `deny`）。 */
+    contactsSetPolicy(openId: string, policy: QqContactPolicy): Promise<QqContact>;
+    /** 更新来源的授权状态与显示名。 */
+    contactsUpdate(openId: string, patch: UpdateQqContactInput): Promise<QqContact>;
+    /** 删除一条来源记录。 */
+    contactsRemove(openId: string): Promise<void>;
+    /** 各授权状态下的数量（徽章用）。 */
+    contactsCounts(): Promise<QqContactCounts>;
   };
 
   /** 流式聊天。 */

@@ -154,17 +154,28 @@ export async function runSmokeChecks(deps: SmokeDeps): Promise<void> {
 
   // ------------------------------------------------------------ 数据层
 
-  check('SQLite 已建好 5 张业务表', () => {
+  check('SQLite 已建好 6 张业务表且 schema 为 v2', () => {
     const rows = deps.db.raw
       .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
       .all() as { name: string }[];
     const names = rows.map((r) => r.name);
-    for (const table of ['providers', 'conversations', 'messages', 'personas', 'qq_config']) {
+    for (const table of [
+      'providers',
+      'conversations',
+      'messages',
+      'personas',
+      'qq_config',
+      'qq_contacts',
+    ]) {
       if (!names.includes(table)) {
         throw new Error(`缺少表 ${table}，实际：${names.join(',')}`);
       }
     }
-    return names.join(',');
+    const version = deps.db.raw.pragma('user_version', { simple: true }) as number;
+    if (version !== 2) {
+      throw new Error(`user_version 应为 2，实际 ${version}`);
+    }
+    return `${names.join(',')} (user_version=${version})`;
   });
 
   check('内置示例角色已种入', () => {
@@ -175,13 +186,31 @@ export async function runSmokeChecks(deps: SmokeDeps): Promise<void> {
     return `${personas.length} 个：${personas.map((p) => p.name).join('/')}`;
   });
 
-  check('QQ 配置可 upsert 并读回', () => {
-    repo.saveQqConfig(deps.db, { appId: 'smoke-app', groupIds: ['1', '2'], status: 'connected' });
+  check('QQ 配置与来源授权可落库并读回', () => {
+    repo.saveQqConfig(deps.db, {
+      appId: 'smoke-app',
+      ownerOpenIds: ['owner-1'],
+      status: 'connected',
+    });
     const cfg = repo.getQqConfig(deps.db);
-    if (cfg.appId !== 'smoke-app' || cfg.groupIds.join(',') !== '1,2') {
-      throw new Error(`读回不一致：${JSON.stringify(cfg)}`);
+    if (cfg.appId !== 'smoke-app' || cfg.ownerOpenIds.join(',') !== 'owner-1') {
+      throw new Error(`配置读回不一致：${JSON.stringify(cfg)}`);
     }
-    return 'appId/groupIds 往返一致';
+    // 默认必须是 fail-closed，否则等于把账号交给模型
+    if (cfg.allowAllWhenEmpty !== false) {
+      throw new Error('allowAllWhenEmpty 默认应为 false（fail-closed）');
+    }
+
+    // 来源：先被「发现」（policy=none，不投递给模型），授权后才进允许列表
+    repo.recordQqContactSeen(deps.db, { openId: 'smoke-group', kind: 'group' });
+    if (repo.listAllowedOpenIds(deps.db, 'group').includes('smoke-group')) {
+      throw new Error('未授权来源不该出现在允许列表里');
+    }
+    repo.setQqContactPolicy(deps.db, 'smoke-group', 'allow');
+    if (!repo.listAllowedOpenIds(deps.db, 'group').includes('smoke-group')) {
+      throw new Error('授权后仍未出现在允许列表里');
+    }
+    return 'qq_config + qq_contacts 往返一致，默认 fail-closed';
   });
 
   // -------------------------------------------------- 提供假模型接口

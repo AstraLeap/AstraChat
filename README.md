@@ -19,7 +19,7 @@ QQ bot 接入配置管理。刻意**去掉办公套件**，保持轻量。
 | **聊天界面** | 左侧对话列表（新建 / 重命名 / 删除 / 切换）、右侧消息气泡、流式输出、Markdown 渲染 + 代码高亮、Enter 发送 / Shift+Enter 换行 |
 | **对话持久化** | 全部对话与消息落 SQLite；支持按关键词搜索（标题 + 消息正文），启动自动加载最近对话 |
 | **人格与提示词** | 角色 = 名称 + 头像 + 系统提示词；对话可绑定角色，发送时自动注入系统提示词；内置 4 个示例角色 |
-| **QQ bot 接入管理** | AppID / AppSecret / Token / 群号白名单 / 连接状态 UI 与配置存储。**v0.1.0 仅存储配置，不建立真实连接**（预留 v0.2.0 接口） |
+| **QQ bot 接入管理** | AppID / AppSecret / Token、「已发现的来源」逐条授权、白名单 / 审计 / 节流策略、连接状态 UI 与配置存储。**当前版本仅存储配置，不建立真实连接**（v0.2.0 走官方 Bot API，见 [设计文档](docs/qq-integration-design.md)） |
 
 ---
 
@@ -148,10 +148,14 @@ astra-chat/
 
 ### 数据库
 
-5 张表：`providers`、`conversations`、`messages`、`personas`、`qq_config`。
+6 张表（schema v2）：`providers`、`conversations`、`messages`、`personas`、`qq_config`、
+`qq_contacts`。
 时间戳统一为 Unix 毫秒；外键已开启（`PRAGMA foreign_keys = ON`），删除对话会级联
 删除其消息，删除提供商/角色会把关联对话的对应外键置空。schema 版本用
 `PRAGMA user_version` 记录，迁移逻辑见 `src/db/connection.ts`。
+
+`qq_contacts`（v2 新增）承载 QQ 来源授权，见下方「已知坑」第 10 条与
+[docs/qq-integration-design.md](docs/qq-integration-design.md) §5。
 
 数据库文件位置：`<userData>/astra-chat.db`（设置页「关于」区块会显示完整路径）。
 
@@ -169,7 +173,7 @@ npm run smoke       # 端到端冒烟（需要先 npm run build）
 刻意切在一行 JSON 与 UTF-8 多字节字符中间），然后用**隔离的临时 userData** 启动真实
 Electron，完整验证：
 
-- SQLite 建表 / 内置角色种入 / QQ 配置往返
+- SQLite 建表 / schema 版本 / 内置角色种入 / QQ 配置与来源授权往返
 - `window.astra` 桥接注入、React 挂载
 - 聊天全链路：渲染 → IPC → fetch/SSE → 落库 → 事件回推
 - 事件序列为 `start → delta… → done`，增量拼接结果与假服务端逐字节一致
@@ -307,12 +311,44 @@ rg '[\x{1F000}-\x{1FAFF}\x{2600}-\x{27BF}\x{2B00}-\x{2BFF}\x{FE0F}\x{2726}\x{271
 
 > 12 个图标总计只增加 3.5 KB（gzip +1.14 KB），可以忽略。
 
+### 10. schema v2：迁移用「重建表」而不是逐列加列，QQ 白名单从手填改成「发现后授权」
+
+两件事都值得记下来，因为都不是凭直觉会做的选择。
+
+**(1) 迁移为什么重建表。** v1 → v2 要给 `qq_config` 加 10 个新列。直觉做法是
+`ALTER TABLE ADD COLUMN`，但那样新列会被追加到 `updated_at` **之后**，而「全新库」
+走的是另一份 v2 DDL，`updated_at` 在最后 —— **两条路径产出的列顺序不同**。
+`tests/qq-schema.spec.ts` 里有一条用例专门把两条路径分别建库再逐表比对列名与类型，
+它当场就把这个分叉抓了出来。
+
+顺序本身在按名取列时无语义，但「两条路径产出同一个结构」是更强、更好推理的不变量，
+所以改成：把旧表改名 → 用与全新库**同一份 DDL 常量**建新表 → 搬数据 → 删旧表，
+整个过程包在一个事务里。一致性由**构造**保证，而不是靠两份 DDL 字面量慢慢写歪。
+
+顺带一个教训：那条用例第一次跑还失败在「`providers` 表在升级库里不存在」——
+因为我的 v1 测试夹具只建了 `qq_config`。真实的 v1 库里其余 4 张表本来就在。
+夹具改成「先用当前代码建库，再把 `qq_config` 退化成 v1 形态」，才既真实又不会产生假失败。
+
+**(2) QQ 白名单为什么不能手填。** v0.1.0 让用户填「群号」（数字校验）。但官方 QQ 开放
+平台只给机器人 `openid`（`group_openid` / `user_openid`），**不给 QQ 号 / 群号**，用户
+根本没有地方查到这些值，手填这条路走不通。
+
+所以 v2 新增 `qq_contacts` 表，把授权改成三态 `none` / `allow` / `deny`：
+机器人收到消息时先把来源记下来（默认 `none`，此时**消息不投给模型**），
+用户在设置页「已发现的来源」里逐条授权。`deny` 优先于 `allow`。
+配套的默认值是 **fail-closed**：`enabled=false`、`allowAllWhenEmpty=false`。
+
+授权操作**不做乐观更新**（先落库、成功后再改界面）：它决定消息要不要投给模型，
+界面显示「已允许」而库里是 `none` 是安全边界上最危险的不一致。
+`tests/qq-store.spec.ts` 有一条用例专门锁住这个行为。设计细节见
+[docs/qq-integration-design.md](docs/qq-integration-design.md)。
+
 ---
 
 ## 📌 v0.1.0 的边界（有意不做）
 
-- **QQ bot 不建立真实连接**：只做配置存储与状态呈现。真实连接应实现于 `electron/`，
-  复用 `src/db/qq.ts` 的读写。
+- **QQ bot 不建立真实连接**：只做配置存储、来源授权与状态呈现。真实连接（官方 QQ 开放
+  平台 Bot API）实现于后续阶段，复用 `src/db/qq.ts` 与 `src/db/qq-contacts.ts`。
 - 只支持 **OpenAI 兼容协议**；Anthropic 与 Gemini 走各自官方的 OpenAI 兼容端点。
 - API Key 在 SQLite 中**明文存储**，未接系统钥匙串。
 - API Key/AppSecret/Token 在界面上只做掩码展示，但未做额外的静态加密。
@@ -324,3 +360,10 @@ rg '[\x{1F000}-\x{1FAFF}\x{2600}-\x{27BF}\x{2B00}-\x{2BFF}\x{FE0F}\x{2726}\x{271
 
 本项目基于 **MIT** 许可证开源，见 [LICENSE](LICENSE)。
 完全自研，未复制任何 AGPL 项目的代码。
+
+设计上参考过若干开源项目的**思路**（不含代码）。需要特别说明的是
+`Derpyu520/qq-bridge`：该仓库内**没有 LICENSE 文件**，其根 `package.json` 也没有
+`license` 字段，按默认规则属于「保留所有权利」。因此本项目**只借鉴其设计思想、
+未复制任何代码** —— 所借鉴的具体条目与自研替代方案见
+[docs/qq-integration-design.md](docs/qq-integration-design.md) §4.3。若将来需要引用其代码，
+须先取得作者授权并在 `ATTRIBUTION.md` 中登记。

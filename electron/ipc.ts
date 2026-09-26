@@ -7,11 +7,14 @@ import type {
   CreateMessageInput,
   CreatePersonaInput,
   CreateProviderInput,
+  ListQqContactsFilter,
+  QqContactPolicy,
   UpdateConversationInput,
   UpdateMessageInput,
   UpdatePersonaInput,
   UpdateProviderInput,
   UpdateQqConfigInput,
+  UpdateQqContactInput,
 } from '../src/types/index';
 import * as repo from '../src/db/index';
 import type { Db } from '../src/db/index';
@@ -64,6 +67,26 @@ function requireObject<T extends object>(value: unknown, label: string): T {
     throw new Error(`参数「${label}」必须是对象`);
   }
   return value as T;
+}
+
+/** QQ 来源授权状态的合法取值。 */
+const QQ_CONTACT_POLICIES: readonly QqContactPolicy[] = ['none', 'allow', 'deny'];
+
+/**
+ * 断言入参是合法的来源授权状态。
+ *
+ * 必须白名单校验：授权状态直接决定「消息要不要投给模型」，是安全边界，
+ * 不能让渲染层塞任意字符串（数据库的 CHECK 约束也会拦，但错误信息不如这里清楚）。
+ *
+ * @param value 待校验的值。
+ * @returns 合法的授权状态。
+ * @throws 校验失败时抛出 `Error`。
+ */
+function requireQqContactPolicy(value: unknown): QqContactPolicy {
+  if (typeof value !== 'string' || !QQ_CONTACT_POLICIES.includes(value as QqContactPolicy)) {
+    throw new Error(`参数「policy」必须是 ${QQ_CONTACT_POLICIES.join(' / ')} 之一`);
+  }
+  return value as QqContactPolicy;
 }
 
 /**
@@ -183,6 +206,38 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   ipcMain.handle(IPC_CHANNELS.qq.save, (_event, patch: unknown) =>
     repo.saveQqConfig(db, requireObject<UpdateQqConfigInput>(patch, 'patch')),
   );
+
+  // 已发现的来源（群 / 私聊）及其授权。官方 API 只给 openid，来源是「发现」来的，
+  // 所以这里提供的是列表 + 逐条授权，而不是让用户填群号。
+  ipcMain.handle(IPC_CHANNELS.qq.contactsList, (_event, filter: unknown) =>
+    repo.listQqContacts(db, (filter ?? {}) as ListQqContactsFilter),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.qq.contactsSetPolicy,
+    (_event, openId: unknown, policy: unknown) =>
+      repo.setQqContactPolicy(
+        db,
+        requireString(openId, 'openId'),
+        requireQqContactPolicy(policy),
+      ),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.qq.contactsUpdate,
+    (_event, openId: unknown, patch: unknown) =>
+      repo.updateQqContact(
+        db,
+        requireString(openId, 'openId'),
+        requireObject<UpdateQqContactInput>(patch, 'patch'),
+      ),
+  );
+
+  ipcMain.handle(IPC_CHANNELS.qq.contactsRemove, (_event, openId: unknown) => {
+    repo.removeQqContact(db, requireString(openId, 'openId'));
+  });
+
+  ipcMain.handle(IPC_CHANNELS.qq.contactsCounts, () => repo.countQqContactsByPolicy(db));
 
   // -------------------------------------------------------------- chat
 

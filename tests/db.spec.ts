@@ -336,12 +336,19 @@ describe('conversations 搜索', () => {
 });
 
 describe('qq_config 数据层', () => {
+  // 说明：v2 起 qq_config 只剩「凭据 + 全局策略」，逐来源授权搬到了 qq_contacts。
+  // 新字段、数值夹取、迁移与 qq_contacts 的完整覆盖见 `tests/qq-schema.spec.ts`，
+  // 这里只保留最基础的凭据往返检查。
+
   it('首次读取返回默认值且不落库', () => {
     const db = freshDb();
     const cfg = getQqConfig(db);
     expect(cfg).toMatchObject({
       appId: '',
-      groupIds: [],
+      appSecret: '',
+      token: '',
+      ownerOpenIds: [],
+      allowAllWhenEmpty: false,
       enabled: false,
       status: 'disconnected',
     });
@@ -350,20 +357,19 @@ describe('qq_config 数据层', () => {
     db.close();
   });
 
-  it('upsert 保存并可再次读回（含群号 JSON 往返）', () => {
+  it('upsert 保存凭据并可再次读回', () => {
     const db = freshDb();
     saveQqConfig(db, {
       appId: '102000',
       appSecret: 'secret',
       token: 'tok',
-      groupIds: ['111', '222'],
       enabled: true,
       status: 'connected',
     });
 
     const cfg = getQqConfig(db);
     expect(cfg.appId).toBe('102000');
-    expect(cfg.groupIds).toEqual(['111', '222']);
+    expect(cfg.appSecret).toBe('secret');
     expect(cfg.enabled).toBe(true);
     expect(cfg.status).toBe('connected');
 
@@ -371,22 +377,15 @@ describe('qq_config 数据层', () => {
     const next = saveQqConfig(db, { token: 'tok2' });
     expect(next.token).toBe('tok2');
     expect(next.appId).toBe('102000');
-    expect(next.groupIds).toEqual(['111', '222']);
+    expect(next.appSecret).toBe('secret');
     db.close();
   });
 
-  it('群号去重并剔除空白项', () => {
-    const db = freshDb();
-    const cfg = saveQqConfig(db, { groupIds: [' 111 ', '111', '', '  ', '222'] });
-    expect(cfg.groupIds).toEqual(['111', '222']);
-    db.close();
-  });
-
-  it('群号 JSON 损坏时降级为空数组而不是抛错', () => {
+  it('ownerOpenIds 的 JSON 损坏时降级为空数组而不是抛错', () => {
     const db = freshDb();
     saveQqConfig(db, { appId: 'x' });
-    db.raw.prepare('UPDATE qq_config SET group_ids = ? WHERE id = ?').run('{oops', 'default');
-    expect(getQqConfig(db).groupIds).toEqual([]);
+    db.raw.prepare('UPDATE qq_config SET owner_open_ids = ? WHERE id = ?').run('{oops', 'default');
+    expect(getQqConfig(db).ownerOpenIds).toEqual([]);
     db.close();
   });
 });
