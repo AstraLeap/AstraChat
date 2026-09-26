@@ -19,8 +19,8 @@ import type {
 import * as repo from '../src/db/index';
 import type { Db } from '../src/db/index';
 import { abortStream, startStream } from './chat';
-import { createQqConnection, type QqConnection } from './qq/connection';
-import { createQqHttp } from './qq/http';
+import { createQqStack, type QqRuntime } from './qq/setup';
+import type { QqInbound } from '../src/services/qq/events';
 import type { QqConnectionSnapshot } from '../src/types/index';
 
 /**
@@ -244,8 +244,8 @@ export function registerIpcHandlers(deps: IpcDeps): void {
 
   // --------------------------------------------------------- qq 真实连接
 
-  /** 惰性创建的 QQ 连接；未点「连接」前不建立，避免无意义的重连循环。 */
-  let qqConnection: QqConnection | null = null;
+  /** 惰性创建的 QQ 运行时；未点「连接」前不建立，避免无意义的重连循环。 */
+  let qqRuntime: QqRuntime | null = null;
 
   /** 未连接时的状态应答。 */
   const IDLE_SNAPSHOT: QqConnectionSnapshot = {
@@ -268,55 +268,60 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   }
 
   /**
-   * 取（必要时创建）QQ 连接。
+   * QQ 会话的系统提示词。
    *
-   * @returns 连接句柄。
+   * 强调「不要自称 AI / 助手、别用 Markdown 标题」是刻意的：群聊里出现
+   * 「作为一个 AI 助手，我……」会立刻暴露是机器人，而且 Markdown 会被转成纯文本后
+   * 变成一堆多余的符号（出站管线本来就会转，但让模型别写更干净）。
+   *
+   * @param message 入站消息。
+   * @returns 系统提示词。
    */
-  function getQqConnection(): QqConnection {
-    if (qqConnection === null) {
-      qqConnection = createQqConnection({
-        // 每次都重新读库，用户在设置页改完配置点「连接」即生效
-        getConfig: () => {
-          const config = repo.getQqConfig(db);
-          return {
-            appId: config.appId,
-            appSecret: config.appSecret,
-            intents: config.intents,
-            sandbox: config.sandbox,
-          };
-        },
-        createHttp: (options) => createQqHttp(options),
-        onEvent: (payload) => {
-          // 消息处理链路（授权 → 模型 → 发送）**尚未接线**。
-          // 这里如实记录而不是假装处理 —— 否则界面上看起来「连上了、在工作」，
-          // 实际什么都不会回，那比明确的日志难查得多。
-          console.warn(
-            `[qq] 已连接但消息处理尚未接线，收到事件 ${payload.t ?? '(无 t)'} 已忽略`,
-          );
-        },
-        onState: (state, message) => {
-          broadcastQqStatus({
-            state,
-            message,
-            botId: qqConnection?.getState().botId ?? null,
-          });
-        },
-      });
+  function qqSystemPrompt(message: QqInbound): string {
+    if (message.kind === 'group') {
+      return [
+        '你是一个 QQ 群里的普通成员，正在参与群聊。',
+        '说话简短、自然、口语化，像真人一样，一般不超过两句话。',
+        '绝对不要自称 AI、助手、模型或机器人。',
+        '不要使用 Markdown 标题、列表或代码块，用普通句子。',
+        '不确定或不想接话时，可以只回一两个字。',
+      ].join('\n');
     }
-    return qqConnection;
+    return [
+      '你是一个 QQ 私聊里的聊天对象。',
+      '说话简短、自然、口语化，像真人一样。',
+      '绝对不要自称 AI、助手、模型或机器人。',
+    ].join('\n');
   }
 
-  ipcMain.handle(IPC_CHANNELS.qq.status, () => qqConnection?.getState() ?? IDLE_SNAPSHOT);
+  /**
+   * 取（必要时创建）QQ 运行时。
+   *
+   * @returns 运行时句柄。
+   */
+  function getQqRuntime(): QqRuntime {
+    if (qqRuntime === null) {
+      qqRuntime = createQqStack({
+        db,
+        onStatus: (status) => broadcastQqStatus(status),
+        getSystemPrompt: qqSystemPrompt,
+        log: (message) => console.warn(`[qq] ${message}`),
+      });
+    }
+    return qqRuntime;
+  }
+
+  ipcMain.handle(IPC_CHANNELS.qq.status, () => qqRuntime?.getStatus() ?? IDLE_SNAPSHOT);
 
   ipcMain.handle(IPC_CHANNELS.qq.connect, async () => {
-    const connection = getQqConnection();
-    await connection.start();
-    return connection.getState();
+    const runtime = getQqRuntime();
+    await runtime.start();
+    return runtime.getStatus();
   });
 
   ipcMain.handle(IPC_CHANNELS.qq.disconnect, () => {
-    qqConnection?.stop();
-    return qqConnection?.getState() ?? IDLE_SNAPSHOT;
+    qqRuntime?.stop();
+    return qqRuntime?.getStatus() ?? IDLE_SNAPSHOT;
   });
 
   // -------------------------------------------------------------- chat
