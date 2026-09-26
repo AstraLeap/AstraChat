@@ -3,6 +3,10 @@ import { startFakeQqServer, type FakeQqServer } from './helpers/fake-qq-server';
 import { createQqConnection, type QqConnection } from '../electron/qq/connection';
 import { createQqHttp } from '../electron/qq/http';
 import { createQqService } from '../electron/qq/service';
+import { createQqStack } from '../electron/qq/setup';
+import { openDatabase } from '../src/db/index';
+import { saveQqConfig } from '../src/db/qq';
+import { recordQqContactSeen, setQqContactPolicy } from '../src/db/qq-contacts';
 import type { QqConfig } from '../src/types/index';
 
 /**
@@ -284,5 +288,126 @@ describe('端到端：失败与恢复', () => {
     expect(server.heartbeats).toBeGreaterThan(0);
     // 心跳被确认 → 不会因为「连续未确认」被误判断线
     expect(connection.getState().state).toBe('connected');
+  });
+});
+
+describe('【核心】整条链路：真实 setup 栈 + 内存数据库 + 假模型', () => {
+  it('群消息 → 授权 → 会话装配 → 模型 → 出站管线 → 真的发出去', async () => {
+    server = await startFakeQqServer({ modelReply: '模型回复：你好' });
+    const current = server;
+
+    // 真实数据库（内存），配置与授权都配好 —— 这一层不再是手写的假依赖
+    const db = openDatabase(':memory:');
+    saveQqConfig(db, {
+      appId: 'APP',
+      appSecret: 'SECRET',
+      intents: 1 << 25,
+      enabled: true,
+      replyInPrivate: true,
+      auditEnabled: true,
+    });
+    recordQqContactSeen(db, { openId: 'GROUP_OPENID', kind: 'group', displayName: '测试群' });
+    setQqContactPolicy(db, 'GROUP_OPENID', 'allow');
+
+    const stack = createQqStack({
+      db,
+      onStatus: () => undefined,
+      getSystemPrompt: () => '你是群友。',
+      // 模型也指向假服务端：它同时提供 /chat/completions
+      getProvider: () => ({ baseUrl: current.baseUrl, apiKey: '', model: 'fake-model' }),
+      createHttp: (options) => createQqHttp({ ...options, baseUrl: current.baseUrl }),
+      log: () => undefined,
+    });
+
+    await stack.start();
+    await waitFor(() => stack.getStatus().state === 'connected', '连接就绪');
+
+    current.pushEvent('GROUP_AT_MESSAGE_CREATE', groupData({ content: '你好' }));
+
+    // ① 模型真的被调用了，且 prompt 是拼对的
+    await waitFor(() => current.chatRequests.length > 0, '模型收到请求');
+    const messages = current.chatRequests[0]?.['messages'] as
+      | { role: string; content: string }[]
+      | undefined;
+    expect(messages?.[0]).toEqual({ role: 'system', content: '你是群友。' });
+    expect(messages?.[messages.length - 1]).toEqual({ role: 'user', content: '小明：你好' });
+
+    // ② 分段增量被拼成完整回复，并经出站管线发出去
+    await waitFor(() => current.sent.length > 0, '收到回复');
+    expect(current.sent[0]?.path).toBe('/v2/groups/GROUP_OPENID/messages');
+    expect(current.sent[0]?.body).toEqual({
+      msg_type: 0,
+      content: '模型回复：你好',
+      msg_id: 'EVENT_MSG_ID',
+      msg_seq: 1,
+    });
+
+    stack.stop();
+  });
+
+  it('未授权来源不会触达模型', async () => {
+    server = await startFakeQqServer({ modelReply: '不该出现' });
+    const current = server;
+
+    const db = openDatabase(':memory:');
+    saveQqConfig(db, { enabled: true, appId: 'APP', appSecret: 'SECRET', intents: 1 << 25 });
+    // 见过但**不授权**
+    recordQqContactSeen(db, { openId: 'GROUP_OPENID', kind: 'group' });
+
+    const stack = createQqStack({
+      db,
+      onStatus: () => undefined,
+      getSystemPrompt: () => '你是群友。',
+      getProvider: () => ({ baseUrl: current.baseUrl, apiKey: '', model: 'fake-model' }),
+      createHttp: (options) => createQqHttp({ ...options, baseUrl: current.baseUrl }),
+      log: () => undefined,
+    });
+
+    await stack.start();
+    await waitFor(() => stack.getStatus().state === 'connected', '连接就绪');
+    current.pushEvent('GROUP_AT_MESSAGE_CREATE', groupData());
+
+    // 给它足够时间「如果会发就发了」
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(current.chatRequests).toHaveLength(0);
+    expect(current.sent).toHaveLength(0);
+
+    stack.stop();
+  });
+
+  it('命中审计的内容不会发出去（模型说了本机路径）', async () => {
+    server = await startFakeQqServer({ modelReply: '文件在 C:\\Users\\a\\b.txt' });
+    const current = server;
+
+    const db = openDatabase(':memory:');
+    saveQqConfig(db, {
+      enabled: true,
+      appId: 'APP',
+      appSecret: 'SECRET',
+      intents: 1 << 25,
+      auditEnabled: true,
+    });
+    recordQqContactSeen(db, { openId: 'GROUP_OPENID', kind: 'group' });
+    setQqContactPolicy(db, 'GROUP_OPENID', 'allow');
+
+    const stack = createQqStack({
+      db,
+      onStatus: () => undefined,
+      getSystemPrompt: () => '你是群友。',
+      getProvider: () => ({ baseUrl: current.baseUrl, apiKey: '', model: 'fake-model' }),
+      createHttp: (options) => createQqHttp({ ...options, baseUrl: current.baseUrl }),
+      log: () => undefined,
+    });
+
+    await stack.start();
+    await waitFor(() => stack.getStatus().state === 'connected', '连接就绪');
+    current.pushEvent('GROUP_AT_MESSAGE_CREATE', groupData());
+
+    await waitFor(() => current.chatRequests.length > 0, '模型被调用了');
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    // 模型回了，但审计拦下 → 一条都不发
+    expect(current.sent).toHaveLength(0);
+
+    stack.stop();
   });
 });

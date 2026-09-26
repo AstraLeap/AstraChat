@@ -55,6 +55,8 @@ export interface FakeQqServer {
   resume: Record<string, unknown> | null;
   /** 收到的心跳次数。 */
   heartbeats: number;
+  /** 收到的模型请求（`/chat/completions`），用来断言 prompt 拼得对不对。 */
+  chatRequests: Record<string, unknown>[];
   /** 当前连接数。 */
   clientCount: () => number;
   /** 向所有已连接客户端推送一个 Dispatch 事件。 */
@@ -73,6 +75,8 @@ export interface FakeQqServerOptions {
   heartbeatIntervalMs?: number;
   /** 发送接口是否返回业务错误（用来测失败路径）。 */
   sendError?: { code: number; message: string } | null;
+  /** 模型端点返回的正文；分两段流式吐出，用来验证增量累积。 */
+  modelReply?: string;
   /** 是否在下发 Hello 后立刻用关闭码踢掉连接（测 intents 无权限）。 */
   rejectWithCode?: number | null;
 }
@@ -209,9 +213,12 @@ export async function startFakeQqServer(options: FakeQqServerOptions = {}): Prom
   const heartbeatIntervalMs = options.heartbeatIntervalMs ?? 1000;
   const sendError = options.sendError ?? null;
   const rejectWithCode = options.rejectWithCode ?? null;
+  const modelReply = options.modelReply ?? '模型回复';
 
   const clients = new Set<Client>();
   const sent: { path: string; body: Record<string, unknown> }[] = [];
+  /** 收到的模型请求。 */
+  const chatRequests: Record<string, unknown>[] = [];
   const state = {
     identify: null as Record<string, unknown> | null,
     resume: null as Record<string, unknown> | null,
@@ -246,6 +253,23 @@ export async function startFakeQqServer(options: FakeQqServerOptions = {}): Prom
       }
 
       res.setHeader('content-type', 'application/json');
+
+      // 模型端点：吐 SSE，用来让整条链路真的走一次模型调用
+      if (url.startsWith('/chat/completions')) {
+        chatRequests.push(body);
+        res.setHeader('content-type', 'text/event-stream');
+        res.setHeader('cache-control', 'no-cache');
+
+        const reply = modelReply;
+        // 分两段，验证调用方把增量拼对了（而不是只取第一段）
+        const half = Math.ceil(reply.length / 2);
+        for (const piece of [reply.slice(0, half), reply.slice(half)]) {
+          res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: piece } }] })}\n\n`);
+        }
+        res.write('data: [DONE]\n\n');
+        res.end();
+        return;
+      }
 
       if (url === '/app/getAppAccessToken') {
         res.end(JSON.stringify({ access_token: token, expires_in: 7200 }));
@@ -428,6 +452,7 @@ export async function startFakeQqServer(options: FakeQqServerOptions = {}): Prom
     baseUrl: `http://127.0.0.1:${port}`,
     wsUrl: `ws://127.0.0.1:${port}/websocket`,
     sent,
+    chatRequests,
     get identify() {
       return state.identify;
     },

@@ -4,7 +4,7 @@ import { createQqHistory } from '../../src/services/qq/history';
 import { isRoleClearRequest, type QqCommand } from '../../src/services/qq/commands';
 import { createQqDbPorts } from './adapters';
 import { createQqCompleter, type QqProviderConfig } from './model';
-import { createQqRuntime, type QqRuntime } from './runtime';
+import { createQqRuntime, type QqRuntime, type QqRuntimeHttp } from './runtime';
 
 export type { QqRuntime };
 import type { Db } from '../../src/db/index';
@@ -48,6 +48,15 @@ export interface QqStackDeps {
   getSystemPrompt: (message: QqInbound) => string;
   /** 日志出口。 */
   log?: (message: string) => void;
+  /**
+   * 覆盖模型提供商的选择（测试用）。
+   *
+   * 缺省从数据库取第一个可用提供商。做成可注入是为了让整条链路能在测试里跑通
+   * ——否则必须先往库里塞一条 provider 记录。
+   */
+  getProvider?: () => QqProviderConfig | null;
+  /** 覆盖 HTTP 客户端构造（测试用；缺省打正式环境）。 */
+  createHttp?: (options: { appId: string; appSecret: string }) => QqRuntimeHttp;
 }
 
 /** 命令说明。 */
@@ -111,7 +120,7 @@ export function createQqStack(deps: QqStackDeps): QqRuntime {
     getSystemPrompt: (message) => deps.getSystemPrompt(message),
   });
   const completer = createQqCompleter({
-    getProvider: () => pickProvider(deps.db),
+    getProvider: deps.getProvider ?? (() => pickProvider(deps.db)),
     log,
   });
 
@@ -120,6 +129,7 @@ export function createQqStack(deps: QqStackDeps): QqRuntime {
 
   const runtime = createQqRuntime({
     loadConfig: () => ports.loadConfig(),
+    ...(deps.createHttp !== undefined ? { createHttp: deps.createHttp } : {}),
     lookupContact: (openId) => ports.lookupContact(openId),
     recordContactSeen: (input) => ports.recordContactSeen(input),
 
