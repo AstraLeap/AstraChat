@@ -1,5 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { createQqHttp } from './qq/http';
+import { createQqStack } from './qq/setup';
 import { join } from 'node:path';
 import { app, type BrowserWindow } from 'electron';
 import * as repo from '../src/db/index';
@@ -479,6 +481,98 @@ export async function runSmokeChecks(deps: SmokeDeps): Promise<void> {
 
   if (fakeServer) {
     await new Promise<void>((resolve) => fakeServer?.close(() => resolve()));
+  }
+
+  // --------------------------------------------------------- QQ 链路
+
+  /**
+   * 记录一次异步检查。
+   *
+   * QQ 检查要建立连接并轮询结果，没法用同步的 `check`。
+   *
+   * @param name 检查项名称。
+   * @param fn 检查体；抛错即视为失败。
+   */
+  const checkAsync = async (name: string, fn: () => Promise<string | void>): Promise<void> => {
+    try {
+      const detail = await fn();
+      checks.push({ name, ok: true, ...(detail ? { detail } : {}) });
+    } catch (error) {
+      checks.push({
+        name,
+        ok: false,
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  // 假 QQ 服务端由 scripts/smoke.mjs 起在**另一个进程**里，地址经环境变量传进来。
+  // 没传就跳过（单独跑 electron/smoke 时）—— 跳过而不是判失败。
+  const fakeQqBase = process.env.ASTRA_FAKE_QQ_BASE_URL ?? '';
+
+  if (fakeQqBase.length > 0) {
+    await checkAsync('QQ 链路：连上假服务端后能完整回一条群消息', async () => {
+      const qqDb = repo.openDatabase(':memory:');
+      repo.saveQqConfig(qqDb, {
+        appId: 'SMOKE_APP',
+        appSecret: 'SMOKE_SECRET',
+        intents: 1 << 25,
+        enabled: true,
+        replyInPrivate: true,
+        auditEnabled: true,
+      });
+      repo.recordQqContactSeen(qqDb, { openId: 'SMOKE_GROUP', kind: 'group' });
+      repo.setQqContactPolicy(qqDb, 'SMOKE_GROUP', 'allow');
+
+      const stack = createQqStack({
+        db: qqDb,
+        onStatus: () => undefined,
+        getSystemPrompt: () => '你是群友。',
+        // 模型也指向假服务端（它同时提供 /chat/completions）
+        getProvider: () => ({ baseUrl: fakeQqBase, apiKey: '', model: 'smoke-model' }),
+        createHttp: (options) => createQqHttp({ ...options, baseUrl: fakeQqBase }),
+        log: () => undefined,
+      });
+
+      try {
+        await stack.start();
+
+        const deadline = Date.now() + 20_000;
+        let received: { path?: string; body?: Record<string, unknown> } | null = null;
+
+        while (Date.now() < deadline) {
+          if (stack.getStatus().state === 'connected') {
+            const res = await fetch(`${fakeQqBase}/__test/sent`);
+            const data = (await res.json()) as {
+              sent?: { path?: string; body?: Record<string, unknown> }[];
+            };
+            const first = data.sent?.[0];
+            if (first !== undefined) {
+              received = first;
+              break;
+            }
+          }
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+
+        if (received === null) {
+          throw new Error('等待超时：假 QQ 服务端一直没收到回复');
+        }
+        if (received.path !== '/v2/groups/SMOKE_GROUP/messages') {
+          throw new Error(`发送路径不对：${received.path ?? '(空)'}`);
+        }
+        const body = received.body ?? {};
+        if (body['msg_id'] !== 'SMOKE_QQ_MSG') {
+          throw new Error(`msg_id 不对：${String(body['msg_id'])}`);
+        }
+        if (body['msg_seq'] !== 1) {
+          throw new Error(`msg_seq 应为 1，实际 ${String(body['msg_seq'])}`);
+        }
+        return `被动回复 msg_id=${String(body['msg_id'])} msg_seq=${String(body['msg_seq'])} 正文="${String(body['content'])}"`;
+      } finally {
+        stack.stop();
+      }
+    });
   }
 
   // ------------------------------------------------------------- 汇总

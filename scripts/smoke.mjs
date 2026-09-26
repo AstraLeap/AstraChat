@@ -43,7 +43,22 @@ console.log(`▶ 冒烟测试：userData=${userDataDir}`);
 // 服务端，区别只是这里跑的是构建产物、且会启动真实的 Electron 主进程。
 // 用 Node 22.18+ 的类型擦除直接 import TS helper（与 scripts/qq-probe.mjs 同法）。
 const { startFakeQqServer } = await import('../tests/helpers/fake-qq-server.ts');
-const fakeQq = await startFakeQqServer({ heartbeatIntervalMs: 500 });
+const fakeQq = await startFakeQqServer({
+  heartbeatIntervalMs: 500,
+  // 鉴权成功后自动推一条群消息：假服务端与冒烟检查在不同进程，
+  // 没法直接调 pushEvent，所以让它自己推。
+  // openId 必须与 electron/smoke.ts 里授权的那个一致。
+  autoEvent: {
+    t: 'GROUP_AT_MESSAGE_CREATE',
+    d: {
+      id: 'SMOKE_QQ_MSG',
+      author: { member_openid: 'SMOKE_MEMBER', member_role: 'member', username: '冒烟用户' },
+      content: '冒烟测试',
+      group_openid: 'SMOKE_GROUP',
+      timestamp: '2026-09-26T15:00:00+08:00',
+    },
+  },
+});
 console.log(`▶ 假 QQ 服务端：${fakeQq.baseUrl}`);
 
 const electronPath = require('electron');
