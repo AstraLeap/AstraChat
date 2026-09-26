@@ -156,7 +156,7 @@ export async function runSmokeChecks(deps: SmokeDeps): Promise<void> {
 
   // ------------------------------------------------------------ 数据层
 
-  check('SQLite 已建好 6 张业务表且 schema 为 v2', () => {
+  check('SQLite 已建好 6 张业务表且 schema 为 v3', () => {
     const rows = deps.db.raw
       .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
       .all() as { name: string }[];
@@ -174,8 +174,8 @@ export async function runSmokeChecks(deps: SmokeDeps): Promise<void> {
       }
     }
     const version = deps.db.raw.pragma('user_version', { simple: true }) as number;
-    if (version !== 2) {
-      throw new Error(`user_version 应为 2，实际 ${version}`);
+    if (version !== 3) {
+      throw new Error(`user_version 应为 3，实际 ${version}`);
     }
     return `${names.join(',')} (user_version=${version})`;
   });

@@ -51,6 +51,9 @@ const FALLBACK_QQ_CONFIG: QqConfig = {
   maxSendPerMinute: 8,
   maxSendPerHour: 60,
   maxReplyChars: 500,
+  socialMode: 'off',
+  socialCooldownMs: 60_000,
+  socialMaxPerHour: 6,
   updatedAt: 0,
 };
 

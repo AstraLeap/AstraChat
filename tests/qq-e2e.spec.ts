@@ -81,6 +81,9 @@ function makeConfig(): QqConfig {
     maxSendPerMinute: 100,
     maxSendPerHour: 100,
     maxReplyChars: 4000,
+    socialMode: 'off',
+    socialCooldownMs: 60_000,
+    socialMaxPerHour: 6,
     updatedAt: 0,
   };
 }

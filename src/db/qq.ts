@@ -21,7 +21,22 @@ const NUMERIC_LIMITS = {
   maxSendPerMinute: { min: 1, max: 600, fallback: 8 },
   maxSendPerHour: { min: 1, max: 36_000, fallback: 60 },
   maxReplyChars: { min: 1, max: 4500, fallback: 500 },
+  socialCooldownMs: { min: 0, max: 3_600_000, fallback: 60_000 },
+  socialMaxPerHour: { min: 1, max: 600, fallback: 6 },
 } as const;
+
+/**
+ * 归一化发言模式。
+ *
+ * 非法值回退到 `off`（最保守）而不是 `standard`：
+ * 配置读坏时**不该突然开始自己插嘴**。
+ *
+ * @param value 原始值。
+ * @returns 合法模式。
+ */
+function normalizeSocialMode(value: unknown): QqConfig['socialMode'] {
+  return value === 'standard' || value === 'exp' ? value : 'off';
+}
 
 /** SQLite 返回的 qq_config 行。 */
 interface QqConfigRow {
@@ -42,6 +57,9 @@ interface QqConfigRow {
   max_send_per_minute: number;
   max_send_per_hour: number;
   max_reply_chars: number;
+  social_mode: string;
+  social_cooldown_ms: number;
+  social_max_per_hour: number;
   updated_at: number;
 }
 
@@ -70,6 +88,9 @@ function toQqConfig(row: QqConfigRow): QqConfig {
     maxSendPerMinute: row.max_send_per_minute,
     maxSendPerHour: row.max_send_per_hour,
     maxReplyChars: row.max_reply_chars,
+    socialMode: normalizeSocialMode(row.social_mode),
+    socialCooldownMs: row.social_cooldown_ms,
+    socialMaxPerHour: row.social_max_per_hour,
     updatedAt: row.updated_at,
   };
 }
@@ -102,6 +123,10 @@ function defaultQqConfig(): QqConfig {
     maxSendPerMinute: NUMERIC_LIMITS.maxSendPerMinute.fallback,
     maxSendPerHour: NUMERIC_LIMITS.maxSendPerHour.fallback,
     maxReplyChars: NUMERIC_LIMITS.maxReplyChars.fallback,
+    // 默认关闭：不让模型自己插嘴，行为最保守
+    socialMode: 'off',
+    socialCooldownMs: NUMERIC_LIMITS.socialCooldownMs.fallback,
+    socialMaxPerHour: NUMERIC_LIMITS.socialMaxPerHour.fallback,
     updatedAt: Date.now(),
   };
 }
@@ -187,6 +212,15 @@ export function saveQqConfig(db: Db, patch: UpdateQqConfigInput): QqConfig {
       patch.maxReplyChars ?? current.maxReplyChars,
       NUMERIC_LIMITS.maxReplyChars,
     ),
+    socialMode: normalizeSocialMode(patch.socialMode ?? current.socialMode),
+    socialCooldownMs: clampNumber(
+      patch.socialCooldownMs ?? current.socialCooldownMs,
+      NUMERIC_LIMITS.socialCooldownMs,
+    ),
+    socialMaxPerHour: clampNumber(
+      patch.socialMaxPerHour ?? current.socialMaxPerHour,
+      NUMERIC_LIMITS.socialMaxPerHour,
+    ),
     updatedAt: Date.now(),
   };
 
@@ -196,12 +230,14 @@ export function saveQqConfig(db: Db, patch: UpdateQqConfigInput): QqConfig {
          (id, app_id, app_secret, token, enabled, status, status_message,
           intents, sandbox, owner_open_ids, allow_all_when_empty, reply_in_private,
           audit_enabled, send_delay_ms, max_send_per_minute, max_send_per_hour,
-          max_reply_chars, updated_at)
+          max_reply_chars, social_mode, social_cooldown_ms, social_max_per_hour,
+          updated_at)
        VALUES
          (@id, @appId, @appSecret, @token, @enabled, @status, @statusMessage,
           @intents, @sandbox, @ownerOpenIds, @allowAllWhenEmpty, @replyInPrivate,
           @auditEnabled, @sendDelayMs, @maxSendPerMinute, @maxSendPerHour,
-          @maxReplyChars, @updatedAt)
+          @maxReplyChars, @socialMode, @socialCooldownMs, @socialMaxPerHour,
+          @updatedAt)
        ON CONFLICT(id) DO UPDATE SET
          app_id = excluded.app_id,
          app_secret = excluded.app_secret,
@@ -219,6 +255,9 @@ export function saveQqConfig(db: Db, patch: UpdateQqConfigInput): QqConfig {
          max_send_per_minute = excluded.max_send_per_minute,
          max_send_per_hour = excluded.max_send_per_hour,
          max_reply_chars = excluded.max_reply_chars,
+         social_mode = excluded.social_mode,
+         social_cooldown_ms = excluded.social_cooldown_ms,
+         social_max_per_hour = excluded.social_max_per_hour,
          updated_at = excluded.updated_at`,
     )
     .run({
@@ -239,6 +278,9 @@ export function saveQqConfig(db: Db, patch: UpdateQqConfigInput): QqConfig {
       maxSendPerMinute: next.maxSendPerMinute,
       maxSendPerHour: next.maxSendPerHour,
       maxReplyChars: next.maxReplyChars,
+      socialMode: next.socialMode,
+      socialCooldownMs: next.socialCooldownMs,
+      socialMaxPerHour: next.socialMaxPerHour,
       updatedAt: next.updatedAt,
     });
 

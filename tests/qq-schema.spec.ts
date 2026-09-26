@@ -92,10 +92,68 @@ function createLegacyV1Database(filePath: string): void {
   seeded.close();
 }
 
+/**
+ * v2 的 `qq_config` 建表语句（**冻结的历史快照**）。
+ *
+ * 与 v1 同理：它是**被迁移的对象**，不该跟着当前 DDL 一起变 ——
+ * 否则「迁移测试」会随着实现一起漂移，就测不出东西了。
+ */
+const LEGACY_V2_QQ_CONFIG = `
+CREATE TABLE qq_config (
+  id                   TEXT PRIMARY KEY,
+  app_id               TEXT NOT NULL DEFAULT '',
+  app_secret           TEXT NOT NULL DEFAULT '',
+  token                TEXT NOT NULL DEFAULT '',
+  enabled              INTEGER NOT NULL DEFAULT 0,
+  status               TEXT NOT NULL DEFAULT 'disconnected'
+                         CHECK (status IN ('disconnected','connected','error')),
+  status_message       TEXT,
+  intents              INTEGER NOT NULL DEFAULT 0,
+  sandbox              INTEGER NOT NULL DEFAULT 1,
+  owner_open_ids       TEXT NOT NULL DEFAULT '[]',
+  allow_all_when_empty INTEGER NOT NULL DEFAULT 0,
+  reply_in_private     INTEGER NOT NULL DEFAULT 1,
+  audit_enabled        INTEGER NOT NULL DEFAULT 1,
+  send_delay_ms        INTEGER NOT NULL DEFAULT 300,
+  max_send_per_minute  INTEGER NOT NULL DEFAULT 8,
+  max_send_per_hour    INTEGER NOT NULL DEFAULT 60,
+  max_reply_chars      INTEGER NOT NULL DEFAULT 500,
+  updated_at           INTEGER NOT NULL
+);
+`;
+
+/**
+ * 造一个「v2 老库」。
+ *
+ * **这是现有用户真实所处的版本**，所以 v2→v3 是最需要被测的一条迁移路径。
+ * 做法与 v1 夹具一致：先建完整库，再把 `qq_config` 退化成 v2 形态、版本号拨回 2。
+ *
+ * @param filePath 临时文件路径。
+ * @returns 无返回值。
+ */
+function createLegacyV2Database(filePath: string): void {
+  const seeded = openDatabase(filePath);
+  seeded.raw.exec('DROP TABLE qq_config');
+  seeded.raw.exec(LEGACY_V2_QQ_CONFIG);
+  seeded.raw
+    .prepare(
+      `INSERT INTO qq_config
+         (id, app_id, app_secret, token, enabled, status, status_message,
+          intents, sandbox, owner_open_ids, allow_all_when_empty, reply_in_private,
+          audit_enabled, send_delay_ms, max_send_per_minute, max_send_per_hour,
+          max_reply_chars, updated_at)
+       VALUES ('default', 'v2-app', 'v2-secret', 'v2-token', 1, 'connected', '来自 v2',
+               33554432, 0, ?, 1, 1, 1, 500, 10, 100, 1234, 1700000000000)`,
+    )
+    .run(JSON.stringify(['owner-1']));
+  seeded.raw.pragma('user_version = 2');
+  seeded.close();
+}
+
 describe('schema v2：全新库', () => {
-  it('user_version 升到 2，且 6 张表都在', () => {
+  it('user_version 升到 3，且 6 张表都在', () => {
     const db = openDatabase(':memory:');
-    expect(db.raw.pragma('user_version', { simple: true })).toBe(2);
+    expect(db.raw.pragma('user_version', { simple: true })).toBe(3);
 
     const names = (
       db.raw.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as {
@@ -155,6 +213,84 @@ describe('schema v2：全新库', () => {
   });
 });
 
+describe('schema v3：v2 老库升级（现有用户真实路径）', () => {
+  it('保留 v2 已有的全部配置', () => {
+    const dir = `${process.env.TEMP ?? '.'}\\astra-schema-v2-${Date.now()}.db`;
+    createLegacyV2Database(dir);
+
+    const db = openDatabase(dir);
+    const config = getQqConfig(db);
+
+    expect(config.appId).toBe('v2-app');
+    expect(config.appSecret).toBe('v2-secret');
+    expect(config.token).toBe('v2-token');
+    expect(config.enabled).toBe(true);
+    expect(config.status).toBe('connected');
+    expect(config.statusMessage).toBe('来自 v2');
+    // v2 就存在的列必须原样搬运（用户的配置不能丢）
+    expect(config.intents).toBe(33_554_432);
+    expect(config.sandbox).toBe(false);
+    expect(config.ownerOpenIds).toEqual(['owner-1']);
+    expect(config.allowAllWhenEmpty).toBe(true);
+    expect(config.maxSendPerHour).toBe(100);
+    expect(config.maxReplyChars).toBe(1234);
+
+    db.close();
+  });
+
+  it('三列取默认值，其中社交模式默认关闭（升级后行为不变）', () => {
+    const dir = `${process.env.TEMP ?? '.'}\\astra-schema-v2b-${Date.now()}.db`;
+    createLegacyV2Database(dir);
+
+    const db = openDatabase(dir);
+    const config = getQqConfig(db);
+
+    // 关键：老用户升级后**不会突然开始自己插嘴**
+    expect(config.socialMode).toBe('off');
+    expect(config.socialCooldownMs).toBe(60_000);
+    expect(config.socialMaxPerHour).toBe(6);
+
+    db.close();
+  });
+
+  it('迁移后 user_version = 3', () => {
+    const dir = `${process.env.TEMP ?? '.'}\\astra-schema-v2c-${Date.now()}.db`;
+    createLegacyV2Database(dir);
+
+    const db = openDatabase(dir);
+    expect(db.raw.pragma('user_version', { simple: true })).toBe(3);
+    db.close();
+  });
+
+  it('重复打开已升级的 v3 库不会重复迁移、也不会丢配置', () => {
+    const dir = `${process.env.TEMP ?? '.'}\\astra-schema-v2d-${Date.now()}.db`;
+    createLegacyV2Database(dir);
+
+    const first = openDatabase(dir);
+    first.close();
+    const second = openDatabase(dir);
+
+    expect(second.raw.pragma('user_version', { simple: true })).toBe(3);
+    // 社交模式仍然是默认关闭，而不是被二次迁移改成别的值
+    expect(getQqConfig(second).socialMode).toBe('off');
+    expect(getQqConfig(second).appId).toBe('v2-app');
+    second.close();
+  });
+
+  it('v2 升级后的列顺序与全新库一致', () => {
+    const dir = `${process.env.TEMP ?? '.'}\\astra-schema-v2e-${Date.now()}.db`;
+    createLegacyV2Database(dir);
+
+    const fresh = openDatabase(':memory:');
+    const upgraded = openDatabase(dir);
+
+    expect(columnNames(upgraded, 'qq_config')).toEqual(columnNames(fresh, 'qq_config'));
+
+    fresh.close();
+    upgraded.close();
+  });
+});
+
 describe('schema v2：v1 老库升级', () => {
   it('保留原凭据，补齐新列默认值', () => {
     const dir = `${process.env.TEMP ?? '.'}\\astra-schema-v1-${Date.now()}.db`;
@@ -196,12 +332,12 @@ describe('schema v2：v1 老库升级', () => {
     db.close();
   });
 
-  it('迁移后 user_version = 2 且 group_ids 列已删除', () => {
+  it('迁移后 user_version = 3 且 group_ids 列已删除', () => {
     const dir = `${process.env.TEMP ?? '.'}\\astra-schema-v1-${Date.now()}-c.db`;
     createLegacyV1Database(dir);
 
     const db = openDatabase(dir);
-    expect(db.raw.pragma('user_version', { simple: true })).toBe(2);
+    expect(db.raw.pragma('user_version', { simple: true })).toBe(3);
     expect(columnNames(db, 'qq_config')).not.toContain('group_ids');
     db.close();
   });
@@ -216,7 +352,7 @@ describe('schema v2：v1 老库升级', () => {
 
     const second = openDatabase(dir);
     expect(listQqContacts(second).length).toBe(firstCount);
-    expect(second.raw.pragma('user_version', { simple: true })).toBe(2);
+    expect(second.raw.pragma('user_version', { simple: true })).toBe(3);
     second.close();
   });
 

@@ -269,8 +269,31 @@ export interface QqConfig {
   maxSendPerHour: number;
   /** 单条回复字符上限，超出会按代理对安全切分。 */
   maxReplyChars: number;
+  /**
+   * 是否让模型**自行决定是否回复**群里的背景消息。
+   *
+   * - `off`：只回应被 @ 或私聊的消息（默认，行为最保守）
+   * - `standard`：标准模式。单次调用 + 哨兵，模型不想说话时只输出 `[[SILENCE]]`
+   * - `exp`：**实验性**模式。两次调用（先判定再生成），更准但消耗约翻倍
+   *
+   * 开启后，未被指向的群消息也会投给模型由它判断 —— 这正是「选择性参与」。
+   * 关掉时这些消息在授权阶段就被忽略，不会产生任何模型调用。
+   */
+  socialMode: QqSocialMode;
+  /** 同一来源两次**主动**发言之间的最小间隔（毫秒）。防止机器人刷屏。 */
+  socialCooldownMs: number;
+  /** 同一来源每小时的主动发言上限。被 @ 与私聊不受此限制。 */
+  socialMaxPerHour: number;
   updatedAt: number;
 }
+
+/**
+ * QQ 发言模式。
+ *
+ * `standard` 与 `exp` 的区别只在**判定方式**：前者在同一次调用里让模型用哨兵表态，
+ * 后者多花一次调用来判定。后者更准的原因是「生成中的模型有把话说下去的惯性」。
+ */
+export type QqSocialMode = 'off' | 'standard' | 'exp';
 
 /** 更新 QQ 配置的入参。 */
 export type UpdateQqConfigInput = Partial<Omit<QqConfig, 'id' | 'updatedAt'>>;

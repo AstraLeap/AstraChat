@@ -15,7 +15,7 @@ import type { Database as DatabaseType } from 'better-sqlite3';
  *
  * ## 迁移策略：让「全新库」与「升级库」结构一致由**构造**保证
  *
- * - **全新库**（`user_version = 0`）执行 {@link SCHEMA_SQL}，一步建到 v2。
+ * - **全新库**（`user_version = 0`）执行 {@link SCHEMA_SQL}，一步建到最新版。
  * - **v1 老库**执行 {@link upgradeQqConfigToV2}：**重命名旧表 → 用同一份 DDL 建新表 →
  *   搬数据 → 删旧表**。因为两边用的是**同一个** {@link QQ_CONFIG_DDL} 常量，列的顺序与
  *   类型必然一致，不存在「两条 DDL 字面量慢慢写歪」的风险。
@@ -27,12 +27,16 @@ import type { Database as DatabaseType } from 'better-sqlite3';
  */
 
 /** 当前 schema 版本。升级时递增，并在 {@link migrate} 中追加迁移分支。 */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 /**
- * `qq_config` 的**唯一**建表语句（v2 形态）。
+ * `qq_config` 的**唯一**建表语句（v3 形态）。
  *
- * 全新库与 v1→v2 迁移共用这一份，避免两处 DDL 写歪。
+ * 全新库与各次迁移共用这一份，避免多处 DDL 写歪 ——
+ * 有一条测试专门比对「全新库」与「升级库」的列顺序是否一致。
+ *
+ * v3 新增的三列对应「让模型自行决定是否回复」：
+ * `social_mode` 默认 `off`，即**老库升级后行为不变**。
  */
 const QQ_CONFIG_DDL = `
 CREATE TABLE IF NOT EXISTS qq_config (
@@ -54,6 +58,10 @@ CREATE TABLE IF NOT EXISTS qq_config (
   max_send_per_minute  INTEGER NOT NULL DEFAULT 8,
   max_send_per_hour    INTEGER NOT NULL DEFAULT 60,
   max_reply_chars      INTEGER NOT NULL DEFAULT 500,
+  social_mode          TEXT NOT NULL DEFAULT 'off'
+                         CHECK (social_mode IN ('off','standard','exp')),
+  social_cooldown_ms   INTEGER NOT NULL DEFAULT 60000,
+  social_max_per_hour  INTEGER NOT NULL DEFAULT 6,
   updated_at           INTEGER NOT NULL
 );
 `;
@@ -293,9 +301,89 @@ function upgradeQqConfigToV2(db: DatabaseType): void {
 }
 
 /**
+ * v2 → v3 迁移：`qq_config` 新增「让模型自行决定是否回复」的三列。
+ *
+ * 与 v1→v2 同样是**重建表**（共享 {@link QQ_CONFIG_DDL}），保证列顺序与全新库一致。
+ *
+ * 关键语义：**新列一律取默认值，其中 `social_mode = 'off'`** ——
+ * 老用户升级后行为完全不变，不会突然开始自己插嘴。
+ *
+ * @param db 数据库连接。
+ */
+function upgradeQqConfigToV3(db: DatabaseType): void {
+  const before = tableColumns(db, 'qq_config');
+  if (before.has('social_mode')) {
+    // 已是 v3 形态，幂等返回
+    return;
+  }
+
+  /** 整段迁移放在一个事务里，避免中途失败留下半迁移的库。 */
+  const runMigration = db.transaction(() => {
+    const oldRows = db.prepare('SELECT * FROM qq_config').all() as Record<string, unknown>[];
+
+    db.exec(`DROP TABLE IF EXISTS ${QQ_CONFIG_BACKUP_TABLE}`);
+    db.exec(`ALTER TABLE qq_config RENAME TO ${QQ_CONFIG_BACKUP_TABLE}`);
+    db.exec(QQ_CONFIG_DDL);
+
+    const insert = db.prepare(
+      `INSERT INTO qq_config
+         (id, app_id, app_secret, token, enabled, status, status_message,
+          intents, sandbox, owner_open_ids, allow_all_when_empty, reply_in_private,
+          audit_enabled, send_delay_ms, max_send_per_minute, max_send_per_hour,
+          max_reply_chars, social_mode, social_cooldown_ms, social_max_per_hour,
+          updated_at)
+       VALUES
+         (@id, @appId, @appSecret, @token, @enabled, @status, @statusMessage,
+          @intents, @sandbox, @ownerOpenIds, @allowAllWhenEmpty, @replyInPrivate,
+          @auditEnabled, @sendDelayMs, @maxSendPerMinute, @maxSendPerHour,
+          @maxReplyChars, @socialMode, @socialCooldownMs, @socialMaxPerHour,
+          @updatedAt)`,
+    );
+
+    /** 取一个安全的数字（v2 的数值列原样搬运）。 */
+    const asNumber = (value: unknown, fallback: number): number =>
+      typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+
+    const now = Date.now();
+    for (const row of oldRows) {
+      insert.run({
+        id: asText(row['id']) || 'default',
+        appId: asText(row['app_id']),
+        appSecret: asText(row['app_secret']),
+        token: asText(row['token']),
+        enabled: row['enabled'] === 1 ? 1 : 0,
+        status: asText(row['status']) || 'disconnected',
+        statusMessage: typeof row['status_message'] === 'string' ? row['status_message'] : null,
+        // v2 已有这些列，原样保留（用户配置不能丢）
+        intents: asNumber(row['intents'], 0),
+        sandbox: row['sandbox'] === 1 ? 1 : 0,
+        ownerOpenIds: asText(row['owner_open_ids']) || '[]',
+        allowAllWhenEmpty: row['allow_all_when_empty'] === 1 ? 1 : 0,
+        replyInPrivate: row['reply_in_private'] === 1 ? 1 : 0,
+        auditEnabled: row['audit_enabled'] === 1 ? 1 : 0,
+        sendDelayMs: asNumber(row['send_delay_ms'], 300),
+        maxSendPerMinute: asNumber(row['max_send_per_minute'], 8),
+        maxSendPerHour: asNumber(row['max_send_per_hour'], 60),
+        maxReplyChars: asNumber(row['max_reply_chars'], 500),
+        // 新列取默认值：社交模式默认关闭，不改变老用户行为
+        socialMode: 'off',
+        socialCooldownMs: 60_000,
+        socialMaxPerHour: 6,
+        updatedAt: asNumber(row['updated_at'], now),
+      });
+    }
+
+    db.exec(`DROP TABLE ${QQ_CONFIG_BACKUP_TABLE}`);
+  });
+
+  runMigration();
+}
+
+/**
  * 执行 schema 迁移。
  *
  * 用 `user_version` pragma 记录版本，避免额外的元数据表。
+ * 按版本**逐级**应用，这样老库能一路升到最新，而不是只处理相邻版本。
  *
  * @param db 已打开的数据库连接。
  */
@@ -305,9 +393,14 @@ function migrate(db: DatabaseType): void {
   if (current < 1) {
     // 全新库：直接建到最新版。
     db.exec(SCHEMA_SQL);
-  } else if (current < 2) {
-    // v1 老库：v2 只动了 QQ 相关结构。
-    upgradeQqConfigToV2(db);
+  } else {
+    if (current < 2) {
+      // v1 老库：v2 只动了 QQ 相关结构。
+      upgradeQqConfigToV2(db);
+    }
+    if (current < 3) {
+      upgradeQqConfigToV3(db);
+    }
   }
 
   if (current !== SCHEMA_VERSION) {
