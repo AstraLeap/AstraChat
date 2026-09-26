@@ -19,6 +19,9 @@ import type {
 import * as repo from '../src/db/index';
 import type { Db } from '../src/db/index';
 import { abortStream, startStream } from './chat';
+import { createQqConnection, type QqConnection } from './qq/connection';
+import { createQqHttp } from './qq/http';
+import type { QqConnectionSnapshot } from '../src/types/index';
 
 /**
  * 主进程侧的全部 IPC handler 注册。
@@ -238,6 +241,83 @@ export function registerIpcHandlers(deps: IpcDeps): void {
   });
 
   ipcMain.handle(IPC_CHANNELS.qq.contactsCounts, () => repo.countQqContactsByPolicy(db));
+
+  // --------------------------------------------------------- qq 真实连接
+
+  /** 惰性创建的 QQ 连接；未点「连接」前不建立，避免无意义的重连循环。 */
+  let qqConnection: QqConnection | null = null;
+
+  /** 未连接时的状态应答。 */
+  const IDLE_SNAPSHOT: QqConnectionSnapshot = {
+    state: 'stopped',
+    message: '未连接',
+    botId: null,
+  };
+
+  /**
+   * 把状态推给渲染进程。
+   *
+   * @param status 状态快照。
+   */
+  function broadcastQqStatus(status: QqConnectionSnapshot): void {
+    const win = deps.getWindow();
+    if (win === null || win.isDestroyed()) {
+      return;
+    }
+    win.webContents.send(IPC_CHANNELS.qq.statusEvent, status);
+  }
+
+  /**
+   * 取（必要时创建）QQ 连接。
+   *
+   * @returns 连接句柄。
+   */
+  function getQqConnection(): QqConnection {
+    if (qqConnection === null) {
+      qqConnection = createQqConnection({
+        // 每次都重新读库，用户在设置页改完配置点「连接」即生效
+        getConfig: () => {
+          const config = repo.getQqConfig(db);
+          return {
+            appId: config.appId,
+            appSecret: config.appSecret,
+            intents: config.intents,
+            sandbox: config.sandbox,
+          };
+        },
+        createHttp: (options) => createQqHttp(options),
+        onEvent: (payload) => {
+          // 消息处理链路（授权 → 模型 → 发送）**尚未接线**。
+          // 这里如实记录而不是假装处理 —— 否则界面上看起来「连上了、在工作」，
+          // 实际什么都不会回，那比明确的日志难查得多。
+          console.warn(
+            `[qq] 已连接但消息处理尚未接线，收到事件 ${payload.t ?? '(无 t)'} 已忽略`,
+          );
+        },
+        onState: (state, message) => {
+          broadcastQqStatus({
+            state,
+            message,
+            botId: qqConnection?.getState().botId ?? null,
+          });
+        },
+      });
+    }
+    return qqConnection;
+  }
+
+  ipcMain.handle(IPC_CHANNELS.qq.status, () => qqConnection?.getState() ?? IDLE_SNAPSHOT);
+
+  ipcMain.handle(IPC_CHANNELS.qq.connect, async () => {
+    const connection = getQqConnection();
+    await connection.start();
+    return connection.getState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.qq.disconnect, () => {
+    qqConnection?.stop();
+    return qqConnection?.getState() ?? IDLE_SNAPSHOT;
+  });
 
   // -------------------------------------------------------------- chat
 

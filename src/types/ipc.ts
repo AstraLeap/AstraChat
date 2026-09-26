@@ -20,6 +20,7 @@ import type {
   CreateConversationInput,
   CreateMessageInput,
   CreatePersonaInput,
+  QqConnectionSnapshot,
   CreateProviderInput,
   ListQqContactsFilter,
   Message,
@@ -77,6 +78,14 @@ export const IPC_CHANNELS = {
     contactsUpdate: 'qq:contacts:update',
     contactsRemove: 'qq:contacts:remove',
     contactsCounts: 'qq:contacts:counts',
+    /** 启动 QQ 连接（invoke）。 */
+    connect: 'qq:connect',
+    /** 停止 QQ 连接（invoke）。 */
+    disconnect: 'qq:disconnect',
+    /** 读当前连接状态（invoke）。 */
+    status: 'qq:status',
+    /** 主进程 → 渲染进程的连接状态推送（on）。 */
+    statusEvent: 'qq:status-event',
   },
   chat: {
     /** 发起一次流式回复（invoke，立即返回 streamId）。 */
@@ -154,6 +163,24 @@ export interface AstraApi {
     contactsRemove(openId: string): Promise<void>;
     /** 各授权状态下的数量（徽章用）。 */
     contactsCounts(): Promise<QqContactCounts>;
+    /**
+     * 启动与 QQ 开放平台的真实连接。
+     *
+     * 需要已保存 AppID / AppSecret / intents；配置不全时**不抛异常**，
+     * 而是返回 `state: 'error'` 并带上「缺什么」的说明（用户自己能立刻修好）。
+     */
+    connect(): Promise<QqConnectionSnapshot>;
+    /** 停止连接（不再自动重连）。 */
+    disconnect(): Promise<QqConnectionSnapshot>;
+    /** 读当前连接状态（界面首次挂载时用）。 */
+    status(): Promise<QqConnectionSnapshot>;
+    /**
+     * 订阅连接状态变化。
+     *
+     * @param listener 状态回调。
+     * @returns 取消订阅函数（React 里应在 `useEffect` 的清理阶段调用）。
+     */
+    onStatus(listener: (status: QqConnectionSnapshot) => void): () => void;
   };
 
   /** 流式聊天。 */

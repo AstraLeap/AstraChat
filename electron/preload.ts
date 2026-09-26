@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import { IPC_CHANNELS, type AstraApi } from '../src/types/ipc';
-import type { ChatStreamEvent } from '../src/types/index';
+import type { ChatStreamEvent, QqConnectionSnapshot } from '../src/types/index';
 
 /**
  * 预加载脚本：把主进程能力以**最小可用面**暴露给渲染进程。
@@ -56,6 +56,19 @@ function createApi(): AstraApi {
         ipcRenderer.invoke(IPC_CHANNELS.qq.contactsUpdate, openId, patch),
       contactsRemove: (openId) => ipcRenderer.invoke(IPC_CHANNELS.qq.contactsRemove, openId),
       contactsCounts: () => ipcRenderer.invoke(IPC_CHANNELS.qq.contactsCounts),
+      connect: () => ipcRenderer.invoke(IPC_CHANNELS.qq.connect),
+      disconnect: () => ipcRenderer.invoke(IPC_CHANNELS.qq.disconnect),
+      status: () => ipcRenderer.invoke(IPC_CHANNELS.qq.status),
+      onStatus: (listener) => {
+        /** 与 `chat.onEvent` 同理：只转发负载，不泄漏 `IpcRendererEvent`。 */
+        const handler = (_event: unknown, payload: QqConnectionSnapshot): void => {
+          listener(payload);
+        };
+        ipcRenderer.on(IPC_CHANNELS.qq.statusEvent, handler);
+        return () => {
+          ipcRenderer.removeListener(IPC_CHANNELS.qq.statusEvent, handler);
+        };
+      },
     },
     chat: {
       send: (request) => ipcRenderer.invoke(IPC_CHANNELS.chat.send, request),
