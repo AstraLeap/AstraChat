@@ -219,6 +219,58 @@ function parseQuote(raw: unknown): QqQuote | null {
   return null;
 }
 
+/**
+ * 剥掉正文里的 `<@openid>` @ 占位符。
+ *
+ * **全量模式下官方不剥离它**（2026-09-26 实测）：@ 了机器人的正文形如
+ * `<@112B3DDE…> 111`。直接投给模型，模型看到的是一串 openid 而不是「111」。
+ *
+ * 只删占位符本身与紧跟其后的一个空白，**不做全局空白折叠** ——
+ * 否则会把用户正文里的换行与多个空格压平，那是另一类破坏。
+ *
+ * @param text 原始正文。
+ * @returns 清理后的正文。
+ */
+function stripMentionPlaceholders(text: string): string {
+  return text.replace(/<@[^>\s]*>\s?/g, '').trim();
+}
+
+/**
+ * 判断 `mentions` 里有没有「@ 了自己」。
+ *
+ * ## 为什么不能只比对 id（这是一个已经踩过的坑）
+ *
+ * READY 给的机器人 id 是数字（实测 `1227781930829794431`），
+ * 而 `mentions[].id` 是 **openid**（实测 `112B3DDE009A9992D13BF0AF7BE443A3`）——
+ * **两套不同的 id 空间，永远不相等**。只比对 id 会让全量模式下的 `addressedToBot`
+ * 恒为 `false`，表现为「机器人永远不回应任何 @」，而且**不产生任何错误信号**。
+ *
+ * 官方给了明确标记 `is_you`，与 id 空间无关，所以以它为主判据。
+ *
+ * 注意**不能把 `bot: true` 当成「@ 了我」** —— 群里可能同时有别的机器人，
+ * 那个字段只说明被提及的是个机器人，不说明是自己。
+ *
+ * @param raw `d.mentions`。
+ * @param botId 调用方提供的机器人 id（READY 的数字 id 或 openid 均可），作为兜底。
+ * @returns 被 @ 了返回 `true`。
+ */
+function mentionsSelf(raw: unknown, botId: string | null): boolean {
+  for (const mention of asObjectArray(raw)) {
+    if (mention['is_you'] === true) {
+      return true;
+    }
+    if (botId !== null) {
+      if (asNonEmptyString(mention['id']) === botId) {
+        return true;
+      }
+      if (asNonEmptyString(mention['member_openid']) === botId) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 /** `parseInboundEvent` 的选项。 */
 export interface ParseInboundOptions {
   /**
@@ -288,17 +340,17 @@ export function parseInboundEvent(payload: unknown, options: ParseInboundOptions
       .join('\n');
   }
 
+  // 全量模式下官方不剥离 @ 占位符，正文里会残留 `<@openid>`
+  content = stripMentionPlaceholders(content);
+
   // 是否指向机器人
   const botId = asNonEmptyString(options.botId);
   let addressedToBot: boolean;
   if (eventType === 'GROUP_AT_MESSAGE_CREATE' || eventType === 'C2C_MESSAGE_CREATE') {
     addressedToBot = true;
-  } else if (botId === null) {
-    addressedToBot = false;
   } else {
-    addressedToBot = asObjectArray(d['mentions']).some(
-      (mention) => asNonEmptyString(mention['id']) === botId,
-    );
+    // 全量模式：@ 消息也走 GROUP_MESSAGE_CREATE，只能靠 mentions 判断
+    addressedToBot = mentionsSelf(d['mentions'], botId);
   }
 
   return {
