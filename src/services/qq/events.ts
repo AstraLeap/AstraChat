@@ -16,9 +16,15 @@
 
 /** 我们处理的事件类型。 */
 export const INBOUND_EVENT_TYPES = [
-  /** 全量群消息（需机器人开启「接收所有消息」）。 */
+  /** 全量群消息（需机器人开启「接收所有消息」）。**开启全量后 @ 消息也走这个类型。** */
   'GROUP_MESSAGE_CREATE',
-  /** 群里 @ 机器人。 */
+  /**
+   * 群里 @ 机器人。
+   *
+   * ⚠️ **只在「全量模式关闭」时才会出现**。开启全量后 @ 消息同样走
+   * `GROUP_MESSAGE_CREATE`（2026-09-26 实测，见 `docs/qq-protocol-notes.md` §5.1），
+   * 此时「有没有 @ 机器人」只能靠 `mentions` 判断 —— 见 {@link QqInbound.addressedToBot}。
+   */
   'GROUP_AT_MESSAGE_CREATE',
   /** 单聊。 */
   'C2C_MESSAGE_CREATE',
