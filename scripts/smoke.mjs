@@ -38,6 +38,14 @@ const userDataDir = join(workDir, 'userdata');
 
 console.log(`▶ 冒烟测试：userData=${userDataDir}`);
 
+// 假 QQ 服务端（HTTP + WebSocket，协议形状对齐官方）。
+// 有了它，QQ 那套链路才能在**不依赖任何真实凭据**的情况下被冒烟验证 —— 与 E2E 测试同一套
+// 服务端，区别只是这里跑的是构建产物、且会启动真实的 Electron 主进程。
+// 用 Node 22.18+ 的类型擦除直接 import TS helper（与 scripts/qq-probe.mjs 同法）。
+const { startFakeQqServer } = await import('../tests/helpers/fake-qq-server.ts');
+const fakeQq = await startFakeQqServer({ heartbeatIntervalMs: 500 });
+console.log(`▶ 假 QQ 服务端：${fakeQq.baseUrl}`);
+
 const electronPath = require('electron');
 const child = spawn(electronPath, ['.'], {
   cwd: projectRoot,
@@ -47,6 +55,9 @@ const child = spawn(electronPath, ['.'], {
     NODE_ENV: 'production',
     ASTRA_SMOKE_LOG: logPath,
     ASTRA_USER_DATA_DIR: userDataDir,
+    // QQ 链路冒烟用：把 HTTP / WS 地址交给主进程（不配置时主进程应跳过这些检查）
+    ASTRA_FAKE_QQ_BASE_URL: fakeQq.baseUrl,
+    ASTRA_FAKE_QQ_WS_URL: fakeQq.wsUrl,
     // 去掉开发服务器变量，强制走打包后的 file:// 加载路径（这也是发布形态）
     VITE_DEV_SERVER_URL: '',
   },
@@ -55,11 +66,14 @@ const child = spawn(electronPath, ['.'], {
 /** 兜底超时：Electron 卡死时不能永远挂着。 */
 const timeout = setTimeout(() => {
   console.error('✖ 冒烟测试超时（60s），强制结束。');
+  void fakeQq.close();
   child.kill();
 }, 60_000);
 
 child.on('exit', (code) => {
   clearTimeout(timeout);
+  // 关掉假 QQ 服务端，否则它的监听句柄会让本进程不退出
+  void fakeQq.close();
 
   if (!existsSync(logPath)) {
     console.error(`✖ 冒烟测试未产出结果文件（Electron 退出码 ${code}）。`);
